@@ -1,0 +1,47 @@
+name: mull
+description: "Mull — budget-aware wishlist & group shopping."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  path_provider: ^2.1.6
+  http: ^1.6.0
+  url_launcher: ^6.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  integration_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: Chillax
+      fonts:
+        - asset: assets/fonts/Chillax-Medium.otf
+          weight: 500
+        - asset: assets/fonts/Chillax-Semibold.otf
+          weight: 600
+    - family: Excon
+      fonts:
+        - asset: assets/fonts/Excon-Light.otf
+          weight: 300
+        - asset: assets/fonts/Excon-Regular.otf
+          weight: 400
+        - asset: assets/fonts/Excon-Medium.otf
+          weight: 500
+    - family: Ranade
+      fonts:
+        - asset: assets/fonts/Ranade-Light.otf
+          weight: 300
+        - asset: assets/fonts/Ranade-Regular.otf
+          weight: 400
+        - asset: assets/fonts/Ranade-Medium.otf
+          weight: 500
