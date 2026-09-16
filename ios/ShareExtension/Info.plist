@@ -6,11 +6,23 @@
 	<dict>
 		<key>NSExtensionAttributes</key>
 		<dict>
+			<!-- TRUEPREDICATE would put Mull in every share sheet on the phone,
+			     including ones it can do nothing with. Only offer Mull for the
+			     three things the inbox knows how to read. -->
 			<key>NSExtensionActivationRule</key>
-			<string>TRUEPREDICATE</string>
+			<dict>
+				<key>NSExtensionActivationSupportsImageWithMaxCount</key>
+				<integer>1</integer>
+				<key>NSExtensionActivationSupportsWebURLWithMaxCount</key>
+				<integer>1</integer>
+				<key>NSExtensionActivationSupportsText</key>
+				<true/>
+			</dict>
 		</dict>
-		<key>NSExtensionMainStoryboard</key>
-		<string>MainInterface</string>
+		<!-- No storyboard: the extension has no form to fill in. It queues what
+		     it was handed, says so, and dismisses. -->
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.share-services</string>
 	</dict>

@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/inbox.dart';
 import '../data/store.dart';
 import '../ui/icons.dart';
 import '../ui/page.dart';
@@ -13,6 +14,7 @@ import '../ui/widgets.dart';
 import 'groups/groups_screen.dart';
 import 'lists/lists_screen.dart';
 import 'money/home_screen.dart';
+import 'wishlist/add_sheet.dart';
 import 'wishlist/in_reach_screen.dart';
 import 'wishlist/wishlist_screen.dart';
 
@@ -44,12 +46,14 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   MullTab _tab = MullTab.money;
   final _navigators = {for (final t in MullTab.values) t: GlobalKey<NavigatorState>()};
   bool _showingReach = false;
+  bool _draining = false;
   MullStore? _store;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _drainInbox());
   }
 
   @override
@@ -74,8 +78,34 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _store?.refresh();
+      // Shares land while Mull is backgrounded, so resuming is the common case
+      // — the user shares from Zara, then opens Mull.
+      _drainInbox();
     } else if (state == AppLifecycleState.paused) {
       _store?.flush();
+    }
+  }
+
+  /// Offers whatever was shared into Mull from other apps, one item at a time.
+  ///
+  /// The share extension only queues; every guess still has to pass through the
+  /// same editable sheet as a typed entry, because OCR is a guess and the user
+  /// is the one who knows what they actually looked at.
+  Future<void> _drainInbox() async {
+    if (_draining || !mounted) return;
+    _draining = true;
+    try {
+      for (final item in await Inbox.drain()) {
+        // Never land on top of a sheet or the in-reach moment.
+        while (mounted && (SheetDepth.value.value > 0 || _showingReach)) {
+          await Future.delayed(const Duration(milliseconds: 600));
+        }
+        if (!mounted) return;
+        _select(MullTab.wishlist);
+        await showQuickAdd(context, shared: item);
+      }
+    } finally {
+      _draining = false;
     }
   }
 

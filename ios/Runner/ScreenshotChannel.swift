@@ -20,11 +20,19 @@ enum ScreenshotChannel {
   static func register(messenger: FlutterBinaryMessenger) {
     let channel = FlutterMethodChannel(name: "mull/screenshot", binaryMessenger: messenger)
     channel.setMethodCallHandler { call, result in
-      guard call.method == "pick" else {
+      switch call.method {
+      case "pick":
+        present(result)
+      case "drain":
+        // Off the main thread: Vision on a handful of screenshots would
+        // otherwise stall the first frame after launch.
+        DispatchQueue.global(qos: .userInitiated).async {
+          let items = Inbox.drain()
+          DispatchQueue.main.async { result(items) }
+        }
+      default:
         result(FlutterMethodNotImplemented)
-        return
       }
-      present(result)
     }
   }
 
@@ -98,6 +106,74 @@ enum ScreenshotChannel {
       source.draw(in: CGRect(origin: .zero, size: size))
     }
     return scaled.jpegData(compressionQuality: 0.7) ?? Data()
+  }
+}
+
+/// Reads what the share extension queued in the App Group container.
+///
+/// The writing half lives in `ShareExtension/ShareViewController.swift`. The
+/// two are deliberately separate copies of a very small amount of path logic —
+/// sharing one file would mean adding it to both targets, and the only thing
+/// they must agree on is the group identifier below.
+enum Inbox {
+  static let appGroup = "group.com.bharatkhanna.mull"
+
+  private static var directory: URL? {
+    FileManager.default
+      .containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+      .appendingPathComponent("inbox", isDirectory: true)
+  }
+
+  /// Everything shared since the last launch, oldest first, with screenshots
+  /// already recognised. Each entry is removed as it is read, so a crash
+  /// mid-drain costs at most the one item being worked on.
+  static func drain() -> [[String: Any]] {
+    guard let directory,
+      let files = try? FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: nil)
+    else { return [] }
+
+    var out: [[String: Any]] = []
+    // The share writes a millisecond-stamped name, so sorting restores order.
+    for file in files.filter({ $0.pathExtension == "json" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+      defer { try? FileManager.default.removeItem(at: file) }
+
+      guard let data = try? Data(contentsOf: file),
+        let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let items = payload["items"] as? [[String: Any]]
+      else { continue }
+
+      for item in items {
+        if let resolved = resolve(item, in: directory) {
+          out.append(resolved)
+        }
+      }
+    }
+    return out
+  }
+
+  private static func resolve(_ item: [String: Any], in directory: URL) -> [String: Any]? {
+    switch item["kind"] as? String {
+    case "image":
+      guard let name = item["file"] as? String else { return nil }
+      let path = directory.appendingPathComponent(name)
+      defer { try? FileManager.default.removeItem(at: path) }
+      guard let data = try? Data(contentsOf: path),
+        let image = UIImage(data: data),
+        let cgImage = image.cgImage
+      else { return nil }
+      var read = ScreenshotChannel.read(cgImage, orientation: image.cgOrientation)
+      read["kind"] = "image"
+      return read
+    case "link":
+      guard let url = item["url"] as? String else { return nil }
+      return ["kind": "link", "url": url]
+    case "text":
+      guard let text = item["text"] as? String else { return nil }
+      return ["kind": "text", "text": text]
+    default:
+      return nil
+    }
   }
 }
 

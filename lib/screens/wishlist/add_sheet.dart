@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/inbox.dart';
 import '../../core/link_reader.dart';
 import '../../core/money.dart';
 import '../../core/screenshot_reader.dart';
@@ -23,17 +24,26 @@ class AddResult {
 }
 
 /// "Add something" — two taps, details later. Opens the need check for needs.
-Future<void> showQuickAdd(BuildContext context, {ItemKind? kind}) async {
+///
+/// [shared] is set when the item arrived through the share sheet rather than
+/// being typed. Same sheet, same save path — only prefilled, so there is one
+/// add flow to reason about instead of two.
+Future<void> showQuickAdd(BuildContext context, {ItemKind? kind, InboxItem? shared}) async {
   final store = context.readStore;
   final result = await showMullSheet<AddResult>(
     context,
     height: 604,
     builder: (_) => AddSheet(
-      title: 'Add something',
+      title: shared == null ? 'Add something' : 'Add this to Mull',
       cta: 'Save it',
-      footnote: 'Two taps. You can add details later.',
+      footnote: shared == null
+          ? 'Two taps. You can add details later.'
+          : 'Shared from another app — check it over.',
       askKind: true,
       initialKind: kind,
+      initialShot: shared is SharedShot ? shared.read : null,
+      initialUrl: shared is SharedLink ? shared.url : null,
+      initialName: shared is SharedText ? shared.text : null,
     ),
   );
   if (result == null || !context.mounted) return;
@@ -60,6 +70,9 @@ class AddSheet extends StatefulWidget {
     this.namePlaceholder = "What's it called?",
     this.nameHelp = 'Or paste any link — we read the name and price for you.',
     this.priceHint = 'roughly is fine',
+    this.initialShot,
+    this.initialUrl,
+    this.initialName,
   });
 
   final String title;
@@ -71,6 +84,13 @@ class AddSheet extends StatefulWidget {
   final String namePlaceholder;
   final String nameHelp;
   final String priceHint;
+
+  /// Prefill from something shared into Mull from another app. The sheet opens
+  /// already filled in, so the share sheet and the in-app scan land in the same
+  /// editable place rather than two different flows.
+  final ScreenshotRead? initialShot;
+  final String? initialUrl;
+  final String? initialName;
 
   @override
   State<AddSheet> createState() => _AddSheetState();
@@ -101,9 +121,31 @@ class _AddSheetState extends State<AddSheet> {
         if (mounted) setState(() => _clipboardHasText = v);
       });
     }
+    final shot = widget.initialShot;
+    if (shot != null) {
+      _shot = shot;
+      if (shot.name != null) _name.text = shot.name!;
+      if (shot.price != null) _price.text = inr(shot.price!);
+    }
+    if (widget.initialName != null && _name.text.isEmpty) {
+      _name.text = widget.initialName!;
+    }
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      final url = widget.initialUrl;
+      if (url != null) {
+        _readLink(url);
+        return;
+      }
       Future.delayed(const Duration(milliseconds: 280), () {
-        if (mounted) _nameFocus.requestFocus();
+        if (!mounted) return;
+        // Land on the first thing still missing. With nothing prefilled that is
+        // the name, which is the old behaviour.
+        if (_name.text.isEmpty) {
+          _nameFocus.requestFocus();
+        } else if (_price.amount == null) {
+          _priceFocus.requestFocus();
+        }
       });
     });
   }
