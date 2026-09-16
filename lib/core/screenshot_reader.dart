@@ -75,6 +75,12 @@ class ScreenshotReader {
   /// Money written the way stores write it: ₹2,999 / Rs. 2,999 / INR 2999.
   static final _marked = RegExp(r'(?:₹|rs\.?|inr)\s*([\d][\d,]*(?:\.\d{1,2})?)', caseSensitive: false);
 
+  /// The same, with the currency trailing: Massimo Dutti writes "13,900.00INR".
+  static final _markedAfter = RegExp(
+    r'([\d][\d,]*(?:\.\d{1,2})?)\s*(?:₹|rs\.?|inr)\b',
+    caseSensitive: false,
+  );
+
   /// A bare number long enough to plausibly be a price.
   static final _bare = RegExp(r'\b([\d][\d,]{2,}(?:\.\d{1,2})?)\b');
 
@@ -82,13 +88,19 @@ class ScreenshotReader {
 
   /// Marketing and metadata that is never the name and never the price.
   static final _junk = RegExp(
-    r'(%|★|☆|\bemi\b|\bcoupon\b|\bcashback\b|\brating|\breview|\bdeliver|\bbought\b)',
+    r'(★|☆|\bemi\b|\bcoupon\b|\bcashback\b|\brating|\breview|\bdeliver|\bbought\b)',
     caseSensitive: false,
   );
 
+  /// A discount badge — "40% off", "(30%)". Deliberately capped at two digits:
+  /// "100% WOOL REGULAR FIT CHECK SHIRT" is a product name, and half of fashion
+  /// names lead with a fibre percentage. Nothing is ever 100% off.
+  static final _discount = RegExp(r'\b\d{1,2}\s*%');
+
   /// Extra traps for prices only — "off" and "save" are left out of [_junk]
-  /// because Off-White and Savage are things people actually buy.
-  static final _priceJunk = RegExp(r'(\boff\b|\bmonth\b|\bsave\b)', caseSensitive: false);
+  /// because Off-White and Savage are things people actually buy. Any percent
+  /// belongs here too: the "100" in "100% WOOL" is otherwise a tempting number.
+  static final _priceJunk = RegExp(r'(\boff\b|\bmonth\b|\bsave\b|%)', caseSensitive: false);
 
   static final _domainPattern = RegExp(
     r'\b((?:[a-z0-9-]+\.)+(?:com|in|net|org|co|shop|store|io))\b',
@@ -103,6 +115,7 @@ class ScreenshotReader {
     'returns', 'share', 'search', 'cancel', 'done', 'similar items', 'checkout',
     'you may also like', 'more like this', 'view details', 'see all', 'shop now',
     'inclusive of all taxes', 'wishlist', 'notify me', 'find in store',
+    'view look', 'view product', 'complete the look', 'size chart',
   };
 
   /// The biggest, most currency-looking number on the screen.
@@ -117,6 +130,7 @@ class ScreenshotReader {
 
       for (final (marked, match) in [
         for (final m in _marked.allMatches(line.text)) (true, m),
+        for (final m in _markedAfter.allMatches(line.text)) (true, m),
         for (final m in _bare.allMatches(line.text)) (false, m),
       ]) {
         final value = parseAmount(match.group(1)!);
@@ -150,8 +164,9 @@ class ScreenshotReader {
       final lower = text.toLowerCase();
       if (text.length < 4 || text.length > 90) continue;
       if (_letters(text) < 3) continue; // prices, sizes, clock, battery
-      if (_junk.hasMatch(text)) continue; // "40% off", "4.3 ★ 2,145 ratings"
-      if (_marked.hasMatch(text)) continue;
+      if (_junk.hasMatch(text)) continue; // "4.3 ★ 2,145 ratings"
+      if (_discount.hasMatch(text)) continue; // "40% off", but not "100% WOOL"
+      if (_marked.hasMatch(text) || _markedAfter.hasMatch(text)) continue;
       if (_domainPattern.hasMatch(text)) continue; // the address bar
       if (_chrome.any((word) => lower.contains(word))) continue;
       if (line.y > .85) continue; // tab bar
@@ -175,7 +190,10 @@ class ScreenshotReader {
 
   static String? _domain(List<OcrLine> lines) {
     for (final line in lines) {
-      if (line.y > .22) continue; // only the address bar counts
+      // Only the address bar counts — and since iOS 15 Safari puts it at the
+      // bottom by default, which is where most real screenshots have it. A
+      // domain in the middle of the page is a footer link, not the store.
+      if (line.y > .22 && line.y < .88) continue;
       final match = _domainPattern.firstMatch(line.text);
       if (match != null) {
         return match.group(1)!.toLowerCase().replaceFirst(RegExp(r'^(www\d?|m)\.'), '');

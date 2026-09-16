@@ -246,6 +246,52 @@ void main() {
       expect(read.name, 'Cotton Oversized Tee');
     });
 
+    test('reads a Massimo Dutti page: fibre percentages are names, not badges', () {
+      // The real failure this came from: "%" was blanket junk, so the actual
+      // name was discarded and "VIEW LOOK" won by being the only line left.
+      final read = ScreenshotReader.parse([
+        at('7:07', .012, .013),
+        at('Massimo Dutti', .128, .020),
+        at('VIEW LOOK', .742, .012),
+        at('100% WOOL REGULAR FIT CHECK SHIRT', .770, .014),
+        at('13,900.00INR', .803, .015),
+        at('MRP incl. of all taxes', .833, .012),
+        at('ADD TO BASKET', .884, .014),
+        at('massimodutti.com', .962, .014),
+      ]);
+      expect(read.name, '100% WOOL REGULAR FIT CHECK SHIRT');
+      expect(read.price, 13900);
+      // Safari's address bar sits at the bottom by default since iOS 15.
+      expect(read.domain, 'massimodutti.com');
+    });
+
+    test('ignores a domain in the middle of the page', () {
+      // A footer link or a watermark is not the store you are shopping at.
+      final read = ScreenshotReader.parse([
+        at('LINEN SHIRT', .40, .022),
+        at('₹2,490', .46, .020),
+        at('also available at brandstore.com', .60, .012),
+      ]);
+      expect(read.domain, isNull);
+    });
+
+    test('reads a price with the currency trailing the number', () {
+      final read = ScreenshotReader.parse([
+        at('LINEN BLEND SHIRT', .50, .022),
+        at('4,990.00INR', .56, .020),
+      ]);
+      expect(read.price, 4990);
+    });
+
+    test('a fibre percentage is never mistaken for the price', () {
+      final read = ScreenshotReader.parse([
+        at('100% COTTON SHIRT', .50, .030),
+        at('₹1,499', .56, .020),
+      ]);
+      expect(read.price, 1499, reason: 'the 100 in "100% COTTON" is not a price');
+      expect(read.name, '100% COTTON SHIRT');
+    });
+
     test('admits when there is nothing to read', () {
       expect(ScreenshotReader.parse(const []).isEmpty, isTrue);
       expect(ScreenshotReader.parse([at('Wi-Fi', .3, .02)]).price, isNull);
