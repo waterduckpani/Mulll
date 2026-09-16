@@ -95,17 +95,27 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     if (_draining || !mounted) return;
     _draining = true;
     try {
+      // Wait for a clear screen *before* draining, not after. Reading the queue
+      // deletes it, so anything pulled while a sheet or the in-reach moment is
+      // up would sit in memory with nothing on disk to recover it — closing the
+      // app there would lose the share silently.
+      await _waitForClearScreen();
+      if (!mounted) return;
+
       for (final item in await Inbox.drain()) {
-        // Never land on top of a sheet or the in-reach moment.
-        while (mounted && (SheetDepth.value.value > 0 || _showingReach)) {
-          await Future.delayed(const Duration(milliseconds: 600));
-        }
+        await _waitForClearScreen();
         if (!mounted) return;
         _select(MullTab.wishlist);
         await showQuickAdd(context, shared: item);
       }
     } finally {
       _draining = false;
+    }
+  }
+
+  Future<void> _waitForClearScreen() async {
+    while (mounted && (SheetDepth.value.value > 0 || _showingReach)) {
+      await Future.delayed(const Duration(milliseconds: 600));
     }
   }
 
