@@ -117,11 +117,11 @@ enum Inbox {
     return out
   }
 
+  /// A queue written by an older build can still hold links, text and
+  /// already-triaged wishlist entries. They are dropped here rather than in
+  /// Dart, so the file they point at goes with them.
   private static func resolve(_ item: [String: Any], in directory: URL) -> [String: Any]? {
     switch item["kind"] as? String {
-    case "resolved":
-      // Already triaged in the share sheet — hand it straight through.
-      return item
     case "image":
       guard let name = item["file"] as? String else { return nil }
       let path = directory.appendingPathComponent(name)
@@ -133,12 +133,6 @@ enum Inbox {
       var read = ScreenshotChannel.read(cgImage, orientation: image.mullOrientation)
       read["kind"] = "image"
       return read
-    case "link":
-      guard let url = item["url"] as? String else { return nil }
-      return ["kind": "link", "url": url]
-    case "text":
-      guard let text = item["text"] as? String else { return nil }
-      return ["kind": "text", "text": text]
     default:
       return nil
     }

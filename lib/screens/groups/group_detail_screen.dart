@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../../core/cycle.dart';
+import '../../core/dates.dart';
 import '../../core/money.dart';
 import '../../core/split.dart';
-import '../../core/upi.dart';
 import '../../data/models.dart';
 import '../../data/store.dart';
 import '../../ui/icons.dart';
@@ -13,7 +12,13 @@ import '../../ui/sheet.dart';
 import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
 import 'group_sheets.dart';
+import 'recurring_sheets.dart';
 
+/// One ledger: where it stands, who pays whom, what repeats, what happened.
+///
+/// The same screen serves a ten-person trip and a one-to-one with a friend —
+/// the arithmetic does not care, so neither does the layout. Only the bits that
+/// would be nonsense for two people are hidden.
 class GroupDetailScreen extends StatelessWidget {
   const GroupDetailScreen({super.key, required this.groupId});
 
@@ -23,21 +28,19 @@ class GroupDetailScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final store = context.store;
     final c = context.c;
-    final group = store.groups.where((g) => g.id == groupId).firstOrNull;
+    final group = store.groupById(groupId);
     if (group == null) return const SizedBox.shrink();
 
     final balance = group.yourBalance;
     final transfers = simplify(group.balances);
     final activity = store.activity(group);
+    final due = group.recurring.where((r) => r.isDue(store.now())).toList();
+    final upcoming = group.recurring.where((r) => r.isActive && !r.isDue(store.now())).toList()
+      ..sort((a, b) => a.nextDue.compareTo(b.nextDue));
 
     Future<void> settings() async {
       final result = await showGroupSettings(context, group);
       if (result == 'deleted' && context.mounted) Navigator.of(context).pop();
-    }
-
-    Future<void> share() async {
-      final sent = await shareOnWhatsApp(store.groupSummary(group));
-      if (!sent && context.mounted) Toast.show(context, "Couldn't open WhatsApp");
     }
 
     return MullPage(
@@ -45,27 +48,27 @@ class GroupDetailScreen extends StatelessWidget {
         BlobSpec(360, 66, top: -70, left: -90),
         BlobSpec(280, 70, bottom: 40, right: -100),
       ],
+      header: DetailBar(
+        label: group.isDirect ? 'Just you two' : '${group.members.length} people',
+        onLabelTap: settings,
+        trailing: CircleButton(
+          filled: false,
+          semanticLabel: 'Settings',
+          onTap: settings,
+          child: MullIcon(MullGlyph.more, size: 18, color: c.ink3),
+        ),
+      ),
       bottom: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          PillButton('Add an expense', onTap: () => showAddExpense(context, group)),
+          PillButton('Add an expense', glyph: MullGlyph.plus, onTap: () => showAddExpense(context, group)),
           if (transfers.isNotEmpty) ...[
             const SizedBox(height: 8),
-            GhostButton('Send summary on WhatsApp', onTap: share),
+            GhostButton('Send summary on WhatsApp', onTap: () => shareGroupSummary(context, group)),
           ],
         ],
       ),
       children: [
-        DetailBar(
-          label: '${group.members.length} people',
-          onLabelTap: settings,
-          trailing: CircleButton(
-            filled: false,
-            semanticLabel: 'Group settings',
-            onTap: settings,
-            child: MullIcon(MullGlyph.more, size: 18, color: c.ink3),
-          ),
-        ),
         Glass(
           margin: const EdgeInsets.fromLTRB(22, 12, 22, 0),
           radius: 34,
@@ -73,7 +76,7 @@ class GroupDetailScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(group.name, style: excon(28, tracking: -.02, color: c.ink)),
+              Text(group.title, style: excon(28, tracking: -.02, color: c.ink)),
               const SizedBox(height: 18),
               Text(
                 balance == 0
@@ -96,23 +99,32 @@ class GroupDetailScreen extends StatelessWidget {
               if (group.expenses.isNotEmpty) ...[
                 const SizedBox(height: 16),
                 Text(
-                  '${inr(group.total)} spent across ${group.expenses.length} ${group.expenses.length == 1 ? 'expense' : 'expenses'}',
+                  '${inr(group.total)} spent across ${group.expenses.length} '
+                  '${group.expenses.length == 1 ? 'expense' : 'expenses'}',
                   style: ranade(11.5, color: c.ink3),
                 ),
               ],
             ],
           ),
         ),
+
         for (final claim in group.awaitingYourConfirmation)
           _ClaimCard(key: ValueKey(claim.id), group: group, settlement: claim),
+
+        if (due.isNotEmpty) ...[
+          const Eyebrow('Due now', padding: EdgeInsets.fromLTRB(30, 22, 30, 0)),
+          for (final schedule in due)
+            _DueRow(key: ValueKey(schedule.id), group: group, schedule: schedule),
+        ],
+
         if (transfers.isNotEmpty) ...[
-          const Eyebrow('Who pays whom', padding: EdgeInsets.fromLTRB(30, 20, 30, 0)),
+          const Eyebrow('Who pays whom', padding: EdgeInsets.fromLTRB(30, 22, 30, 0)),
           Padding(
             padding: const EdgeInsets.fromLTRB(30, 4, 30, 0),
             child: Text(
               transfers.length == 1
-                  ? 'One payment clears the whole group.'
-                  : '${transfers.length} payments clear the whole group.',
+                  ? 'One payment clears the whole thing.'
+                  : '${transfers.length} payments clear the whole thing.',
               style: ranade(11.5, color: c.ink3),
             ),
           ),
@@ -122,17 +134,55 @@ class GroupDetailScreen extends StatelessWidget {
             child: CardRows(
               children: [
                 for (final t in transfers)
-                  _TransferRow(
-                    key: ValueKey('${t.from}-${t.to}'),
-                    group: group,
-                    transfer: t,
-                  ),
+                  _TransferRow(key: ValueKey('${t.from}-${t.to}'), group: group, transfer: t),
               ],
             ),
           ),
         ],
+
+        // The schedules sit above the history because they are the only thing
+        // on this screen that is about what happens next.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(30, 26, 30, 0),
+          child: Row(
+            children: [
+              Expanded(child: Eyebrow('Repeating${group.recurring.isEmpty ? '' : ' · ${group.recurring.length}'}')),
+              Pressable(
+                onTap: () => showRecurringList(context, group),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+                  child: Text(
+                    group.recurring.isEmpty ? 'Set one up' : 'Manage',
+                    style: ranade(12, color: c.ink2),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (upcoming.isEmpty && due.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(30, 8, 30, 0),
+            child: Text(
+              'Rent, wifi, the maid — anything that comes round on its own. Mull '
+              'asks when each one is due.',
+              style: ranade(11.5, height: 1.6, color: c.ink3),
+            ),
+          )
+        else if (upcoming.isNotEmpty)
+          Glass(
+            margin: const EdgeInsets.fromLTRB(22, 12, 22, 0),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
+            child: CardRows(
+              children: [
+                for (final r in upcoming)
+                  _UpcomingRow(key: ValueKey(r.id), group: group, schedule: r),
+              ],
+            ),
+          ),
+
         if (activity.isNotEmpty) ...[
-          const Eyebrow('Activity', padding: EdgeInsets.fromLTRB(30, 22, 30, 0)),
+          const Eyebrow('Activity', padding: EdgeInsets.fromLTRB(30, 26, 30, 0)),
           Glass(
             margin: const EdgeInsets.fromLTRB(22, 10, 22, 0),
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
@@ -215,6 +265,113 @@ class _ClaimCard extends StatelessWidget {
   }
 }
 
+/// A schedule whose turn has come, inside the group it belongs to.
+class _DueRow extends StatelessWidget {
+  const _DueRow({super.key, required this.group, required this.schedule});
+
+  final Group group;
+  final Recurring schedule;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final store = context.store;
+
+    return Glass(
+      margin: const EdgeInsets.fromLTRB(22, 12, 22, 0),
+      radius: 26,
+      padding: const EdgeInsets.fromLTRB(22, 18, 22, 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              MullIcon(MullGlyph.repeat, size: 15, color: c.ink3, strokeWidth: 1.7),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(schedule.description, style: ranade(16, color: c.ink), maxLines: 1),
+              ),
+              Text(inr(schedule.amount), style: excon(19, color: c.ink)),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Due ${relativeDay(schedule.nextDue, store.now())} · ${schedule.frequency.shortLabel}',
+            style: ranade(11.5, color: c.ink3),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: PillButton('Add it', onTap: () => showDueRecurring(context, group, schedule)),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: GhostButton(
+                  'Not this time',
+                  onTap: () {
+                    store.skipDue(group, schedule);
+                    Toast.show(context, 'Skipped · next ${shortDate(schedule.nextDue)}');
+                  },
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _UpcomingRow extends StatelessWidget {
+  const _UpcomingRow({super.key, required this.group, required this.schedule});
+
+  final Group group;
+  final Recurring schedule;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final store = context.store;
+
+    return Pressable(
+      onTap: () => showRecurringEditor(context, group, existing: schedule),
+      scale: .985,
+      haptic: false,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 13),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    schedule.description,
+                    style: ranade(15.5, weight: FontWeight.w300, color: c.ink),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '${schedule.frequency.label} · next ${shortDateWithYear(schedule.nextDue, store.now())}'
+                    '${schedule.autoAdd ? ' · adds itself' : ''}',
+                    style: ranade(11.5, color: c.ink3),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(inr(schedule.amount), style: excon(18, weight: FontWeight.w300, color: c.ink)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _TransferRow extends StatelessWidget {
   const _TransferRow({super.key, required this.group, required this.transfer});
 
@@ -253,6 +410,8 @@ class _TransferRow extends StatelessWidget {
                   Text(
                     from.isYou
                         ? (to.upiId == null ? 'Tap to settle' : 'Tap to pay over UPI')
+                        : to.isYou
+                        ? 'Tap to record it, or send a reminder'
                         : 'Tap when it is paid',
                     style: ranade(11.5, color: c.ink3),
                   ),
@@ -295,11 +454,21 @@ class _ExpenseRow extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    expense.description,
-                    style: ranade(15.5, color: c.ink),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          expense.description,
+                          style: ranade(15.5, color: c.ink),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (expense.isRecurring) ...[
+                        const SizedBox(width: 8),
+                        MullIcon(MullGlyph.repeat, size: 13, color: c.ink3, strokeWidth: 1.6),
+                      ],
+                    ],
                   ),
                   const SizedBox(height: 3),
                   Text(
@@ -312,6 +481,15 @@ class _ExpenseRow extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
+                  if (expense.note != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      expense.note!,
+                      style: ranade(11.5, height: 1.5, color: c.ink3),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -392,6 +570,8 @@ Future<void> _expenseActions(BuildContext context, Group group, Expense expense)
         Future.delayed(const Duration(milliseconds: 160), action);
       }
 
+      final schedule = expense.recurringId == null ? null : group.recurringById(expense.recurringId!);
+
       return Padding(
         padding: const EdgeInsets.fromLTRB(30, 26, 30, 22),
         child: Column(
@@ -411,6 +591,17 @@ Future<void> _expenseActions(BuildContext context, Group group, Expense expense)
             CardRows(
               children: [
                 SheetAction('Edit', onTap: () => run(() => showAddExpense(context, group, existing: expense))),
+                if (schedule != null)
+                  SheetAction(
+                    'The schedule behind it',
+                    detail: schedule.frequency.shortLabel,
+                    onTap: () => run(() => showRecurringEditor(context, group, existing: schedule)),
+                  )
+                else
+                  SheetAction(
+                    'Make it repeat',
+                    onTap: () => run(() => showRecurringEditor(context, group)),
+                  ),
                 SheetAction(
                   'Delete',
                   destructive: true,

@@ -1,33 +1,22 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
-import '../core/cycle.dart';
+import '../core/dates.dart';
 import '../core/money.dart';
 import '../core/split.dart';
 import '../core/upi_receipt.dart';
 import 'models.dart';
 
-/// How long a want must sit out of reach before crossing the line
-/// earns an "In reach now" moment (short stints are silently cleared).
-const kReachMomentMinWait = Duration(hours: 12);
-
-class ReachLayout {
-  const ReachLayout(this.pool, this.inReach, this.outOfReach);
-
-  /// Money available to this segment.
-  final int pool;
-  final List<WishItem> inReach;
-
-  /// Items past the "budget stops here" line, with how far short the budget falls.
-  final List<(WishItem, int)> outOfReach;
-
-  int get count => inReach.length + outOfReach.length;
-}
+/// How long to leave between nudges to the same person.
+///
+/// A reminder is a favour to both sides right up until it is the second one
+/// today, at which point it is nagging and gets read as rude. Mull will not
+/// send one for you inside this window.
+const kNudgeCooldown = Duration(hours: 20);
 
 /// Single source of truth. Local-first: everything is persisted to one JSON file.
 class MullStore extends ChangeNotifier {
@@ -37,13 +26,7 @@ class MullStore extends ChangeNotifier {
   Timer? _saveTimer;
 
   Profile profile = Profile();
-  final List<WishItem> items = [];
-  final List<Spend> spends = [];
-  final List<NamedList> lists = [];
   final List<Group> groups = [];
-
-  /// Per-cycle budget overrides ("just this month").
-  final Map<String, int> budgetOverrides = {};
 
   /// Injectable for tests.
   DateTime Function() clock = DateTime.now;
@@ -64,7 +47,14 @@ class MullStore extends ChangeNotifier {
   }
 
   /// Replaces the shared ledger with what the server sent.
-  void replaceGroups(List<Group> incoming) {
+  ///
+  /// [keepLocalSchedules] is for a project that has not had the recurring
+  /// migration applied: the server cannot carry schedules, so an answer with
+  /// none means "this server does not do schedules", not "they were deleted".
+  /// Once the tables are there the server is the authority and this is false,
+  /// or deleting a schedule on one phone would have it resurrected by the next
+  /// pull on another.
+  void replaceGroups(List<Group> incoming, {bool keepLocalSchedules = false}) {
     // Anything the server has never acknowledged survives a pull.
     //
     // The server is the authority on groups it knows about, so a group missing
@@ -77,6 +67,21 @@ class MullStore extends ChangeNotifier {
       for (final g in groups)
         if (!g.hasReachedServer && !incoming.any((i) => i.id == g.id)) g,
     ];
+
+    // When you last chased someone is this phone's business and has no column
+    // anywhere, so it has to survive a pull or every refresh re-arms the nudge.
+    final held = {for (final g in groups) g.id: g};
+    for (final group in incoming) {
+      final previous = held[group.id];
+      if (previous == null) continue;
+      if (keepLocalSchedules && group.recurring.isEmpty) {
+        group.recurring.addAll(previous.recurring);
+      }
+      for (final member in group.members) {
+        member.nudgedAt ??= previous.memberById(member.id)?.nudgedAt;
+      }
+    }
+
     groups
       ..clear()
       ..addAll(incoming)
@@ -87,7 +92,7 @@ class MullStore extends ChangeNotifier {
   /// Notes that the server has taken a copy. Local-only: re-pushing here would
   /// loop, since a push is what got us here.
   void markGroupSynced(Group group) {
-    group.syncedAt = DateTime.now();
+    group.syncedAt = now();
     _commit();
   }
 
@@ -111,37 +116,77 @@ class MullStore extends ChangeNotifier {
   /// In-memory store for tests and previews.
   factory MullStore.memory() => MullStore._(null);
 
+  /// Loads a saved file straight in. Only for tests — the real path is [load],
+  /// which has a disk read and a corruption fallback wrapped around this.
+  @visibleForTesting
+  void debugRestore(Map<String, dynamic> saved) => _fromJson(saved);
+
+  /// Reads the file, including one written by a version of Mull that still had
+  /// a wishlist in it.
+  ///
+  /// Wishlist, spends and lists are simply not read: they were always private
+  /// to the phone, they are still in the file, and a version that reads them
+  /// back has to have somewhere to put them. Groups carry over untouched,
+  /// which is the part that was ever shared with anyone.
   void _fromJson(Map<String, dynamic> j) {
     profile = Profile.fromJson((j['profile'] as Map).cast());
-    items
-      ..clear()
-      ..addAll((j['items'] as List? ?? []).map((e) => WishItem.fromJson((e as Map).cast())));
-    spends
-      ..clear()
-      ..addAll((j['spends'] as List? ?? []).map((e) => Spend.fromJson((e as Map).cast())));
-    lists
-      ..clear()
-      ..addAll((j['lists'] as List? ?? []).map((e) => NamedList.fromJson((e as Map).cast())));
     groups
       ..clear()
       ..addAll((j['groups'] as List? ?? []).map((e) => Group.fromJson((e as Map).cast())));
-    budgetOverrides
-      ..clear()
-      ..addAll((j['budgetOverrides'] as Map? ?? {}).cast<String, int>());
+    _adoptLegacyRepeats(j);
+  }
+
+  /// Turns the old `repeatsMonthly` flag into a real schedule.
+  ///
+  /// The flag marked an expense as "this happens again" and nothing more — the
+  /// app had to guess, by description, whether next month's had been added.
+  /// Each flagged expense becomes one [Recurring] due a month after it, which
+  /// is what the flag was always trying to say.
+  void _adoptLegacyRepeats(Map<String, dynamic> j) {
+    final saved = (j['groups'] as List? ?? []).cast<Map>();
+    for (final raw in saved) {
+      final group = groups.where((g) => g.id == raw['id']).firstOrNull;
+      if (group == null || group.recurring.isNotEmpty) continue;
+
+      final flagged = <String, Expense>{};
+      for (final e in (raw['expenses'] as List? ?? const []).cast<Map>()) {
+        if (e['repeatsMonthly'] != true) continue;
+        final expense = group.expenses.where((x) => x.id == e['id']).firstOrNull;
+        // Only the most recent of a repeated description becomes the schedule;
+        // the earlier copies are its history, not three separate rents.
+        if (expense == null) continue;
+        final key = expense.description.trim().toLowerCase();
+        final held = flagged[key];
+        if (held == null || expense.date.isAfter(held.date)) flagged[key] = expense;
+      }
+
+      for (final expense in flagged.values) {
+        final schedule = Recurring(
+          description: expense.description,
+          amount: expense.amount,
+          payerId: expense.payerId,
+          shares: Map.of(expense.shares),
+          method: expense.method,
+          frequency: Frequency.monthly,
+          nextDue: addMonths(dayOf(expense.date), 1),
+          lastAddedOn: dayOf(expense.date),
+        );
+        // Catch a schedule up to the present rather than letting it fire once
+        // for every month the app was on the old version.
+        if (schedule.nextDue.isBefore(dayOf(now()))) schedule.advance(now());
+        group.recurring.add(schedule);
+        expense.recurringId = schedule.id;
+      }
+    }
   }
 
   Map<String, dynamic> toJson() => {
-    'version': 1,
+    'version': 2,
     'profile': profile.toJson(),
-    'items': items.map((e) => e.toJson()).toList(),
-    'spends': spends.map((e) => e.toJson()).toList(),
-    'lists': lists.map((e) => e.toJson()).toList(),
     'groups': groups.map((e) => e.toJson()).toList(),
-    'budgetOverrides': budgetOverrides,
   };
 
   void _commit() {
-    _trackReach();
     notifyListeners();
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 250), flush);
@@ -156,309 +201,60 @@ class MullStore extends ChangeNotifier {
     await tmp.rename(file.path);
   }
 
-  /// Re-evaluates time-based state (a new cycle, need checks) — call on resume.
+  /// Re-evaluates time-based state — call on resume.
+  ///
+  /// Deliberately does *not* run the schedules that add themselves. Whoever
+  /// runs those has to say what they created, and only the shell can put a
+  /// toast on the screen; doing it here as well meant resume silently
+  /// materialised them and the announcement found nothing left to announce.
   void refresh() => _commit();
 
-  // ------------------------------------------------------------------ budget
-  //
-  // The budget is a ruler, not a ledger. Nothing here claims money has left
-  // anyone's account — it answers one question: what can this month cover?
-  //
-  //   room           the budget, minus what was actually bought
-  //   needsReserved  the needs queue, set aside first
-  //   leftForWants   what is left over for everything else
-  //
-  // Only buying moves `spent`. Putting something on the wishlist never does,
-  // because wanting a thing costs nothing.
+  // ----------------------------------------------------------------- profile
 
-  Cycle get cycle => Cycle.of(now(), profile.resetDay);
-  int get budget => budgetOverrides[cycle.key] ?? profile.monthlyBudget;
-  bool get budgetOverridden => budgetOverrides.containsKey(cycle.key);
-
-  List<Spend> get cycleSpends {
-    final c = cycle;
-    return spends.where((s) => c.contains(s.date)).toList()..sort((a, b) => b.date.compareTo(a.date));
-  }
-
-  int get spent => cycleSpends.fold(0, (s, e) => s + e.amount);
-
-  List<WishItem> _ofKind(ItemKind k) =>
-      items.where((i) => i.kind == k).toList()..sort((a, b) => a.order.compareTo(b.order));
-
-  List<WishItem> get needs => _ofKind(ItemKind.need);
-  List<WishItem> get wants => _ofKind(ItemKind.want);
-  int get needsTotal => needs.fold(0, (s, e) => s + e.price);
-
-  /// The budget, minus what has actually been bought this cycle.
-  int get room => budget - spent;
-
-  /// Needs come first in the queue, so they are set aside before wants. Capped
-  /// at what is actually there: needs that outgrow the budget cannot reserve
-  /// money that doesn't exist, they just run off the end of the ruler.
-  int get needsReserved => needsTotal.clamp(0, max(room, 0));
-
-  /// The headline number. Negative when the needs alone outgrow the budget.
-  int get leftForWants => room - needsTotal;
-
-  /// A typical month's room for wants, ignoring what has already gone this
-  /// cycle — the rate at which the wishlist actually clears, month over month.
-  int get monthlyWantRoom => budget - needsTotal;
-
-  ReachLayout reach(ItemKind kind) {
-    final list = _ofKind(kind);
-    final pool = kind == ItemKind.need ? room : leftForWants;
-    final inReach = <WishItem>[];
-    final out = <(WishItem, int)>[];
-    var running = 0;
-    for (final item in list) {
-      running += item.price;
-      if (out.isEmpty && running <= pool) {
-        inReach.add(item);
-      } else {
-        out.add((item, running - max(pool, 0)));
-      }
-    }
-    return ReachLayout(pool, inReach, out);
-  }
-
-  int get coveredCount => reach(ItemKind.need).inReach.length + reach(ItemKind.want).inReach.length;
-
-  /// Roughly how many cycles until [item] comes into reach, counting
-  /// everything queued ahead of it — the wishlist clears top-down, so an item
-  /// waits for its turn as much as for its price.
-  ///
-  /// Null when the honest answer is "we don't know": needs already outgrow the
-  /// budget, or it is far enough out that a month count would be a fiction.
-  int? monthsToReach(WishItem item) {
-    if (item.kind == ItemKind.need) return null;
-    final rate = monthlyWantRoom;
-    if (rate <= 0) return null;
-    var cumulative = 0;
-    for (final want in wants) {
-      cumulative += want.price;
-      if (want.id == item.id) break;
-    }
-    final months = (cumulative / rate).ceil();
-    return months > 24 ? null : months.clamp(1, 24);
-  }
-
-  /// The cycle [item] should come within reach in.
-  DateTime? reachDate(WishItem item) {
-    final months = monthsToReach(item);
-    if (months == null) return null;
-    final start = cycle.start;
-    return DateTime(start.year, start.month + months, start.day);
-  }
-
-  /// How far past this month's line buying [item] would land, or 0 if it fits.
-  ///
-  /// Measured against what is left right now rather than the item's place in
-  /// the queue: buying is something you do to one item today, so the honest
-  /// comparison is its price against the money still on the table.
-  ///
-  /// This is the *only* warning the buy flow needs. If two wants are both in
-  /// reach, that already means the budget covers them together — so buying one
-  /// can never push the other out. Spending what you planned to spend is not
-  /// an event. Spending past the line is.
-  int overBudgetBy(WishItem item) => max(0, item.price - max(room, 0));
-
-  void setBudget(int amount, {bool justThisCycle = false}) {
-    if (justThisCycle) {
-      budgetOverrides[cycle.key] = amount;
-    } else {
-      budgetOverrides.remove(cycle.key);
-      profile.monthlyBudget = amount;
-    }
-    _commit();
-  }
-
-  void setResetDay(int day) {
-    profile.resetDay = day.clamp(1, 28);
-    _commit();
-  }
-
-  void completeOnboarding({required String name, required int budget}) {
+  void completeOnboarding({required String name}) {
     profile
       ..name = name.trim()
-      ..monthlyBudget = budget
       ..onboarded = true;
+    _renameYourSeats();
     _commit();
   }
 
   void updateProfile(void Function(Profile p) edit) {
     edit(profile);
+    _renameYourSeats();
     _commit();
   }
 
-  // --------------------------------------------------------------- wishlist
-
-  WishItem addItem({required String name, required int price, required ItemKind kind, String? url}) {
-    final siblings = _ofKind(kind);
-    final item = WishItem(
-      name: name.trim(),
-      price: price,
-      kind: kind,
-      url: url,
-      order: siblings.isEmpty ? 0 : siblings.last.order + 1,
-    );
-    items.add(item);
-    _commit();
-    return item;
-  }
-
-  void updateItem(WishItem item) => _commit();
-
-  void setKind(WishItem item, ItemKind kind) {
-    if (item.kind == kind) return;
-    final siblings = _ofKind(kind);
-    item
-      ..kind = kind
-      ..order = siblings.isEmpty ? 0 : siblings.last.order + 1
-      ..outOfReachSince = null;
-    if (kind == ItemKind.need) item.needCheckedCycle = cycle.key;
-    _commit();
-  }
-
-  void moveToTop(WishItem item) {
-    final siblings = _ofKind(item.kind);
-    item.order = siblings.isEmpty ? 0 : siblings.first.order - 1;
-    _commit();
-  }
-
-  void confirmNeed(WishItem item) {
-    item
-      ..kind = ItemKind.need
-      ..needCheckedCycle = cycle.key;
-    _commit();
-  }
-
-  /// Needs that haven't been re-confirmed this cycle.
-  List<WishItem> get needsToRecheck => needs.where((i) => i.needCheckedCycle != cycle.key).toList();
-
-  WishItem removeItem(WishItem item) {
-    items.removeWhere((i) => i.id == item.id);
-    _commit();
-    return item;
-  }
-
-  void restoreItem(WishItem item) {
-    if (items.any((i) => i.id == item.id)) return;
-    items.add(item);
-    _commit();
-  }
-
-  Spend buyItem(WishItem item) {
-    items.removeWhere((i) => i.id == item.id);
-    final spend = Spend(name: item.name, amount: item.price, item: item.toJson());
-    spends.add(spend);
-    _commit();
-    return spend;
-  }
-
-  /// Removes a spend; if it came from the wishlist, the item goes back.
-  void removeSpend(Spend spend, {bool restoreItem = true}) {
-    spends.removeWhere((s) => s.id == spend.id);
-    final snapshot = spend.item;
-    if (restoreItem && snapshot != null && !items.any((i) => i.id == snapshot['id'])) {
-      items.add(WishItem.fromJson(snapshot)..outOfReachSince = null);
-    }
-    _commit();
-  }
-
-  Spend logSpend(String name, int amount, {DateTime? date}) {
-    final spend = Spend(name: name.trim(), amount: amount, date: date);
-    spends.add(spend);
-    _commit();
-    return spend;
-  }
-
-  void restoreSpend(Spend spend) {
-    if (spends.any((s) => s.id == spend.id)) return;
-    spends.add(spend);
-    _commit();
-  }
-
-  // ------------------------------------------------------------ reach moments
-
-  void _trackReach() {
-    final layout = reach(ItemKind.want);
-    final t = now();
-    for (final item in layout.inReach) {
-      final since = item.outOfReachSince;
-      if (since != null && t.difference(since) < kReachMomentMinWait) item.outOfReachSince = null;
-    }
-    for (final (item, _) in layout.outOfReach) {
-      item.outOfReachSince ??= t;
+  /// Your seat in every group carries your name, so changing it has to reach
+  /// them — otherwise the people you split with keep seeing whatever you were
+  /// called the day you made the group.
+  void _renameYourSeats() {
+    final name = profile.name.trim();
+    if (name.isEmpty) return;
+    for (final group in groups) {
+      final you = group.you;
+      if (you == null || you.name == name) continue;
+      you.name = name;
+      onGroupChanged?.call(group);
     }
   }
 
-  /// Wants that waited below the line and have just crossed it.
-  List<WishItem> get pendingInReach => reach(ItemKind.want).inReach.where((i) => i.outOfReachSince != null).toList();
-
-  void keepWaiting(WishItem item) {
-    item.outOfReachSince = null;
-    _commit();
-  }
-
-  // ------------------------------------------------------------------ lists
-
-  NamedList addList(String name, int? budget) {
-    final list = NamedList(name: name.trim(), budget: budget);
-    lists.add(list);
-    _commit();
-    return list;
-  }
-
-  void updateList(NamedList list) => _commit();
-
-  void deleteList(NamedList list) {
-    lists.removeWhere((l) => l.id == list.id);
-    _commit();
-  }
-
-  void restoreList(NamedList list) {
-    if (lists.any((l) => l.id == list.id)) return;
-    lists.add(list);
-    _commit();
-  }
-
-  void addEntry(NamedList list, String name, int price) {
-    list.entries.add(ListEntry(name: name.trim(), price: price));
-    _commit();
-  }
-
-  void toggleEntry(ListEntry entry) {
-    entry.done = !entry.done;
-    _commit();
-  }
-
-  void removeEntry(NamedList list, ListEntry entry) {
-    list.entries.removeWhere((e) => e.id == entry.id);
-    _commit();
-  }
-
-  void restoreEntry(NamedList list, ListEntry entry, int index) {
-    if (list.entries.any((e) => e.id == entry.id)) return;
-    list.entries.insert(index.clamp(0, list.entries.length), entry);
-    _commit();
-  }
-
-  void reorderEntry(NamedList list, int from, int to) {
-    final e = list.entries.removeAt(from);
-    list.entries.insert(to > from ? to - 1 : to, e);
-    _commit();
-  }
-
-  // ----------------------------------------------------------------- groups
+  // ------------------------------------------------------------------ groups
 
   /// [friends] are people with a Mull account, seated with `userId` attached so
   /// their name and UPI ID come from their own profile. [others] are bare names
   /// — placeholders for people who are not on Mull, which still need to work:
   /// you should be able to split tonight's dinner without everyone at the table
   /// installing something first.
-  Group addGroup(String name, List<String> others, {List<Member> friends = const []}) {
+  Group addGroup(
+    String name,
+    List<String> others, {
+    List<Member> friends = const [],
+    GroupKind kind = GroupKind.group,
+  }) {
     final group = Group(
       name: name.trim(),
+      kind: kind,
       members: [
         Member(name: profile.name.isEmpty ? 'You' : profile.name, isYou: true, upiId: profile.upiId),
         ...friends,
@@ -470,6 +266,65 @@ class MullStore extends ChangeNotifier {
     _commitGroup(group);
     return group;
   }
+
+  /// The one-to-one ledger with someone, made on first use.
+  ///
+  /// Not every debt belongs to a trip. You covered their cab; there is no
+  /// "group" there and inventing one called "Me and Ritu" is the thing people
+  /// hate about split apps. Underneath it is still a two-seat group, so it
+  /// settles, syncs and simplifies exactly like the rest.
+  Group directWith({
+    required String name,
+    String? userId,
+    String? email,
+    String? phone,
+    String? upiId,
+  }) {
+    final existing = groups.where((g) {
+      if (!g.isDirect) return false;
+      final other = g.counterpart;
+      if (other == null) return false;
+      if (userId != null && other.userId != null) return other.userId == userId;
+      if (email != null && other.email != null) {
+        return other.email!.toLowerCase() == email.toLowerCase();
+      }
+      return other.name.trim().toLowerCase() == name.trim().toLowerCase();
+    }).firstOrNull;
+    if (existing != null) return existing;
+
+    final group = Group(
+      name: name.trim(),
+      kind: GroupKind.direct,
+      members: [
+        Member(name: profile.name.isEmpty ? 'You' : profile.name, isYou: true, upiId: profile.upiId),
+        Member(name: name.trim(), userId: userId, email: email, phone: phone, upiId: upiId),
+      ],
+    );
+    groups.add(group);
+    _commitGroup(group);
+    return group;
+  }
+
+  Group? groupById(String id) => groups.where((g) => g.id == id).firstOrNull;
+
+  /// Real groups — what the home screen lists under GROUPS.
+  List<Group> get namedGroups => _ordered(groups.where((g) => !g.isDirect));
+
+  /// One-to-one ledgers, under PEOPLE.
+  List<Group> get directLedgers => _ordered(groups.where((g) => g.isDirect));
+
+  /// Biggest open amount first; anything settled sinks to the bottom.
+  ///
+  /// Not newest-first, and not by last activity. The home screen is a list of
+  /// things to deal with, and the ₹6,250 you owe on the flat is more of a thing
+  /// to deal with than the trip that ended square — even if somebody confirmed
+  /// a payment on the trip an hour ago. Settled ledgers stay visible, because
+  /// they are still who you split with, but they stop competing for the top.
+  List<Group> _ordered(Iterable<Group> of) => [...of]..sort((a, b) {
+    final byAmount = b.yourBalance.abs().compareTo(a.yourBalance.abs());
+    if (byAmount != 0) return byAmount;
+    return b.createdAt.compareTo(a.createdAt);
+  });
 
   void updateGroup(Group group) => _commitGroup(group);
 
@@ -517,10 +372,11 @@ class MullStore extends ChangeNotifier {
   /// Refuses to remove anyone the ledger still depends on — deleting a person
   /// who paid for dinner would silently rewrite what everyone else owes.
   bool canRemoveMember(Group group, Member member) {
-    if (member.isYou) return false;
+    if (member.isYou || group.isDirect) return false;
     final involved = group.expenses.any((e) => e.payerId == member.id || e.shares.containsKey(member.id));
     final settled = group.settlements.any((s) => s.fromId == member.id || s.toId == member.id);
-    return !involved && !settled;
+    final scheduled = group.recurring.any((r) => r.payerId == member.id || r.shares.containsKey(member.id));
+    return !involved && !settled && !scheduled;
   }
 
   bool removeMember(Group group, Member member) {
@@ -542,6 +398,13 @@ class MullStore extends ChangeNotifier {
     }
   }
 
+  void setPhone(Member member, String? phone) {
+    final value = phone?.trim();
+    member.phone = value == null || value.isEmpty ? null : value;
+    final owner = groups.where((g) => g.members.any((m) => m.id == member.id)).firstOrNull;
+    if (owner != null) _commitGroup(owner);
+  }
+
   // ---------------------------------------------------------------- expenses
 
   Expense addExpense(
@@ -551,7 +414,8 @@ class MullStore extends ChangeNotifier {
     required String payerId,
     required Map<String, int> shares,
     SplitMethod method = SplitMethod.equal,
-    bool repeatsMonthly = false,
+    String? recurringId,
+    String? note,
     DateTime? date,
   }) {
     final expense = Expense(
@@ -560,8 +424,9 @@ class MullStore extends ChangeNotifier {
       payerId: payerId,
       shares: Map.of(shares),
       method: method,
-      repeatsMonthly: repeatsMonthly,
-      date: date,
+      recurringId: recurringId,
+      note: note?.trim().isEmpty ?? true ? null : note!.trim(),
+      date: date ?? now(),
     );
     group.expenses.add(expense);
     _commitGroup(group);
@@ -580,6 +445,147 @@ class MullStore extends ChangeNotifier {
     group.expenses.add(expense);
     _commitGroup(group);
   }
+
+  // --------------------------------------------------------------- recurring
+
+  Recurring addRecurring(
+    Group group, {
+    required String description,
+    required int amount,
+    required String payerId,
+    required Map<String, int> shares,
+    SplitMethod method = SplitMethod.equal,
+    Frequency frequency = Frequency.monthly,
+    required DateTime startsOn,
+    DateTime? endsOn,
+    bool autoAdd = false,
+  }) {
+    final schedule = Recurring(
+      description: description.trim(),
+      amount: amount,
+      payerId: payerId,
+      shares: Map.of(shares),
+      method: method,
+      frequency: frequency,
+      nextDue: dayOf(startsOn),
+      endsOn: endsOn == null ? null : dayOf(endsOn),
+      autoAdd: autoAdd,
+    );
+    group.recurring.add(schedule);
+    _commitGroup(group);
+    return schedule;
+  }
+
+  void updateRecurring(Group group, Recurring schedule) => _commitGroup(group);
+
+  void removeRecurring(Group group, Recurring schedule) {
+    group.recurring.removeWhere((r) => r.id == schedule.id);
+    // The expenses it already produced are real money that changed hands, so
+    // they stay. They simply stop belonging to a schedule.
+    for (final e in group.expenses) {
+      if (e.recurringId == schedule.id) e.recurringId = null;
+    }
+    _commitGroup(group);
+  }
+
+  void restoreRecurring(Group group, Recurring schedule) {
+    if (group.recurring.any((r) => r.id == schedule.id)) return;
+    group.recurring.add(schedule);
+    _commitGroup(group);
+  }
+
+  void setRecurringPaused(Group group, Recurring schedule, bool paused) {
+    schedule.paused = paused;
+    // Coming back from a pause should not fire off every period that went by
+    // while it was off — the point of pausing was that those did not happen.
+    if (!paused && schedule.nextDue.isBefore(dayOf(now()))) {
+      schedule.nextDue = dayOf(now());
+    }
+    _commitGroup(group);
+  }
+
+  /// Everything owed right now, across every group, soonest first.
+  List<(Group, Recurring)> get dueRecurring {
+    final t = now();
+    final out = [
+      for (final g in groups)
+        for (final r in g.recurring)
+          if (r.isDue(t)) (g, r),
+    ];
+    out.sort((a, b) => a.$2.nextDue.compareTo(b.$2.nextDue));
+    return out;
+  }
+
+  /// What is coming but has not landed yet — the next two weeks.
+  List<(Group, Recurring)> get upcomingRecurring {
+    final t = now();
+    final horizon = dayOf(t).add(const Duration(days: 14));
+    final out = [
+      for (final g in groups)
+        for (final r in g.recurring)
+          if (r.isActive && !r.isDue(t) && !r.nextDue.isAfter(horizon)) (g, r),
+    ];
+    out.sort((a, b) => a.$2.nextDue.compareTo(b.$2.nextDue));
+    return out;
+  }
+
+  /// Turns a due schedule into a real expense and moves it on.
+  ///
+  /// [amount] and [shares] are overridable because the whole reason this is a
+  /// confirmation rather than a cron job is that the rent went up, or Dev was
+  /// away this month. What is confirmed is what gets recorded.
+  Expense addDue(
+    Group group,
+    Recurring schedule, {
+    int? amount,
+    Map<String, int>? shares,
+    String? payerId,
+    DateTime? date,
+  }) {
+    final on = dayOf(date ?? schedule.nextDue);
+    final expense = addExpense(
+      group,
+      description: schedule.description,
+      amount: amount ?? schedule.amount,
+      payerId: payerId ?? schedule.payerId,
+      shares: shares ?? schedule.shares,
+      method: schedule.method,
+      recurringId: schedule.id,
+      date: on,
+    );
+    // A confirmed change is the new normal — next month should not ask about
+    // the old rent again.
+    if (amount != null) schedule.amount = amount;
+    if (shares != null) schedule.shares = Map.of(shares);
+    if (payerId != null) schedule.payerId = payerId;
+    schedule
+      ..lastAddedOn = on
+      ..advance(now());
+    _commitGroup(group);
+    return expense;
+  }
+
+  /// "Not this month." Moves the schedule on without recording anything.
+  void skipDue(Group group, Recurring schedule) {
+    schedule.advance(now());
+    _commitGroup(group);
+  }
+
+  /// Materialises every schedule that was told to add itself.
+  ///
+  /// Returns what it created so the app can say so. Silence would be the
+  /// failure mode that matters here: an expense nobody was told about is one
+  /// nobody checked, and it is moving real money between real people.
+  List<(Group, Expense)> runAutoRecurring() {
+    final made = <(Group, Expense)>[];
+    for (final (group, schedule) in dueRecurring) {
+      if (!schedule.autoAdd) continue;
+      made.add((group, addDue(group, schedule)));
+    }
+    return made;
+  }
+
+  // -------------------------------------------------------------- settle up
 
   /// Records a payment — as a fact if there is nobody who could dispute it, as
   /// a claim if there is.
@@ -604,6 +610,7 @@ class MullStore extends ChangeNotifier {
       toId: toId,
       amount: amount,
       utr: utr,
+      date: now(),
       status: needsConfirming ? SettlementStatus.pending : SettlementStatus.confirmed,
       confirmedAt: needsConfirming ? null : now(),
     );
@@ -671,35 +678,69 @@ class MullStore extends ChangeNotifier {
       for (final s in g.awaitingYourConfirmation) (g, s),
   ];
 
-  /// Next month's copy of a repeating expense, ready to be reviewed.
+  // --------------------------------------------------------------- reminders
+
+  /// Everyone who owes you, across everything, biggest first.
   ///
-  /// Deliberately a suggestion rather than a scheduler: rent changes, people
-  /// move out, and an expense that appears on its own is one nobody checked.
-  Expense repeatExpense(Group group, Expense source) {
-    final next = DateTime(source.date.year, source.date.month + 1, source.date.day);
-    return addExpense(
-      group,
-      description: source.description,
-      amount: source.amount,
-      payerId: source.payerId,
-      shares: Map.of(source.shares),
-      method: source.method,
-      repeatsMonthly: true,
-      date: next,
-    );
+  /// Netted per person rather than per group: chasing the same friend three
+  /// times because you went to three dinners together is how a reminder
+  /// feature makes people close the app.
+  List<Owing> get owedToYou {
+    final byPerson = <String, Owing>{};
+    for (final group in groups) {
+      final me = group.you?.id;
+      if (me == null) continue;
+      for (final t in simplify(group.balances)) {
+        if (t.to != me) continue;
+        final debtor = group.memberById(t.from);
+        if (debtor == null) continue;
+        final key = debtor.userId ?? debtor.email ?? debtor.name.trim().toLowerCase();
+        final held = byPerson[key];
+        byPerson[key] = Owing(
+          member: debtor,
+          amount: (held?.amount ?? 0) + t.amount,
+          groups: [...?held?.groups, group],
+          lastNudgedAt: held?.lastNudgedAt ?? debtor.nudgedAt,
+        );
+      }
+    }
+    return byPerson.values.toList()..sort((a, b) => b.amount.compareTo(a.amount));
   }
 
-  /// Repeating expenses whose next month has come round and not been added.
-  List<Expense> dueRepeats(Group group) {
-    final t = now();
-    return group.expenses.where((e) {
-      if (!e.repeatsMonthly) return false;
-      final due = DateTime(e.date.year, e.date.month + 1, e.date.day);
-      if (due.isAfter(t)) return false;
-      // Already carried forward if a later copy of the same thing exists.
-      return !group.expenses.any((other) => other.description == e.description && other.date.isAfter(e.date));
-    }).toList();
+  bool canNudge(Owing owing) {
+    final last = owing.lastNudgedAt;
+    return last == null || now().difference(last) > kNudgeCooldown;
   }
+
+  /// The message a nudge sends. Short, and it ends with the way to pay.
+  ///
+  /// Written to be forwarded and read by someone who may not have Mull, which
+  /// is why it names the amount and the reason in plain words rather than
+  /// linking to a screen only you can see.
+  String nudgeMessage(Owing owing) {
+    final where = owing.groups.length == 1
+        ? ' for ${owing.groups.first.title}'
+        : ' across ${owing.groups.length} groups';
+    final upi = profile.upiId;
+    return [
+      'Hey ${shortName(owing.member)} — ${inr(owing.amount)}$where when you get a chance.',
+      if (upi != null) 'My UPI is $upi.',
+      'No rush.',
+    ].join(' ');
+  }
+
+  void markNudged(Owing owing) {
+    final at = now();
+    for (final group in owing.groups) {
+      final seat = group.memberById(owing.member.id) ??
+          group.members.where((m) => !m.isYou && m.name == owing.member.name).firstOrNull;
+      seat?.nudgedAt = at;
+    }
+    owing.member.nudgedAt = at;
+    _commit();
+  }
+
+  // ---------------------------------------------------------------- readouts
 
   /// Everything that happened in the group, newest first.
   List<Object> activity(Group group) =>
@@ -709,8 +750,18 @@ class MullStore extends ChangeNotifier {
         return db.compareTo(da);
       });
 
-  /// Your position across every group at once, for the groups list header.
-  int get groupsNet => groups.fold(0, (s, g) => s + g.yourBalance);
+  /// Your position across everything at once — the number on the home screen.
+  ///
+  /// Negative means you owe. Pending claims deliberately do not move it: until
+  /// the person owed says the money landed, it has not.
+  int get netAcrossAll => groups.fold(0, (s, g) => s + g.yourBalance);
+
+  /// Split out, because "₹3,850 all in" hides the fact that you are owed
+  /// ₹12,000 by one person and owe ₹15,850 to another.
+  int get totalYouOwe => groups.fold(0, (s, g) => s + (g.yourBalance < 0 ? -g.yourBalance : 0));
+  int get totalOwedToYou => groups.fold(0, (s, g) => s + (g.yourBalance > 0 ? g.yourBalance : 0));
+
+  bool get isAllSquare => groups.every((g) => g.yourBalance == 0);
 
   String displayName(Member m) => m.isYou ? 'You' : m.name;
 
@@ -721,7 +772,7 @@ class MullStore extends ChangeNotifier {
   /// Plain text on purpose: the people who need to read it may not have Mull,
   /// and an unreadable summary is the same as no summary.
   String groupSummary(Group group) {
-    final lines = <String>['${group.name} · split on Mull', ''];
+    final lines = <String>['${group.title} · split on Mull', ''];
     final transfers = simplify(group.balances);
     if (transfers.isEmpty) {
       lines.add('All settled up.');
@@ -749,190 +800,164 @@ class MullStore extends ChangeNotifier {
 
   Future<void> resetAll() async {
     profile = Profile();
-    items.clear();
-    spends.clear();
-    lists.clear();
     groups.clear();
-    budgetOverrides.clear();
     _commit();
     await flush();
   }
 
   /// Mirrors the design mockups — handy for demos and screenshots.
   void loadSample() {
-    final t = now();
-    final c = cycle;
-    DateTime ago(int days) => t.subtract(Duration(days: days));
+    groups.clear();
     profile
-      ..name = profile.name.isEmpty ? 'Ananya' : profile.name
-      ..monthlyBudget = 40000
-      ..onboarded = true;
-    budgetOverrides.clear();
-    items
-      ..clear()
-      ..addAll([
-        WishItem(
-          name: 'Laptop charger',
-          price: 2400,
-          kind: ItemKind.need,
-          url: 'https://www.anker.in',
-          order: 0,
-          needCheckedCycle: c.key,
-          createdAt: ago(6),
-        ),
-        WishItem(
-          name: 'Running shoes',
-          price: 6800,
-          kind: ItemKind.need,
-          url: 'https://www.decathlon.in',
-          order: 1,
-          needCheckedCycle: c.key,
-          createdAt: ago(9),
-        ),
-        WishItem(
-          name: 'Mechanical keyboard',
-          price: 12900,
-          originalPrice: 16000,
-          kind: ItemKind.want,
-          url: 'https://www.keychron.in',
-          order: 0,
-          createdAt: ago(38),
-          outOfReachSince: ago(38),
-        ),
-        WishItem(
-          name: 'Filter coffee kit',
-          price: 1850,
-          kind: ItemKind.want,
-          url: 'https://bluetokaicoffee.com',
-          order: 1,
-          createdAt: ago(12),
-        ),
-        WishItem(
-          name: 'Linen shirt',
-          price: 3400,
-          kind: ItemKind.want,
-          url: 'https://www.nicobar.com',
-          order: 2,
-          createdAt: ago(4),
-        ),
-        WishItem(
-          name: 'Headphones',
-          price: 24990,
-          kind: ItemKind.want,
-          url: 'https://www.sony.co.in',
-          order: 3,
-          createdAt: ago(20),
-        ),
-        WishItem(
-          name: 'Standing desk',
-          price: 37800,
-          kind: ItemKind.want,
-          url: 'https://www.featherlite.in',
-          order: 4,
-          createdAt: ago(27),
-        ),
-      ]);
-    final spendDay = c.contains(ago(3)) ? ago(3) : t;
-    spends
-      ..clear()
-      ..addAll([
-        Spend(name: 'Groceries', amount: 3800, date: spendDay),
-        Spend(name: 'Movie night', amount: 2400, date: t),
-      ]);
-    // userId set means the seat has been claimed by a real account, which is
-    // what lets a settlement wait on them to confirm.
-    final you = Member(name: profile.name, isYou: true, upiId: 'ananya@okhdfc', userId: 'u-you');
-    final sahil = Member(name: 'Sahil Mehta', upiId: 'sahil@okaxis', userId: 'u-sahil');
-    final kabir = Member(name: 'Kabir Verma', upiId: 'kabirv@ybl', userId: 'u-kabir');
-    final divya = Member(name: 'Divya Tandon');
-    final dev = Member(name: 'Dev Thakur', upiId: 'devthakur@okicici', userId: 'u-dev');
-    final neha = Member(name: 'Neha Menon');
+      ..name = profile.name.isEmpty ? 'Bharat' : profile.name
+      ..onboarded = true
+      ..upiId ??= 'bharat@okhdfcbank';
 
-    groups
-      ..clear()
-      ..addAll([
-        Group(
-          name: 'Goa trip',
-          members: [you, sahil, kabir, divya],
-          expenses: [
-            Expense(
-              description: 'Flights',
-              amount: 24000,
-              payerId: you.id,
-              shares: splitEqually(24000, [you.id, sahil.id, kabir.id, divya.id]),
-              date: ago(9),
-            ),
-            Expense(
-              description: 'Airbnb',
-              amount: 18000,
-              payerId: sahil.id,
-              shares: splitEqually(18000, [you.id, sahil.id, kabir.id, divya.id]),
-              date: ago(8),
-            ),
-            // The dinner nobody splits evenly: Divya skipped it.
-            Expense(
-              description: 'Dinner at Thalassa',
-              amount: 5400,
-              payerId: kabir.id,
-              shares: splitEqually(5400, [you.id, sahil.id, kabir.id]),
-              date: ago(6),
-            ),
-          ],
-          settlements: [
-            Settlement(
-              fromId: divya.id,
-              toId: you.id,
-              amount: 5000,
-              status: SettlementStatus.confirmed,
-              date: ago(2),
-              confirmedAt: ago(2),
-            ),
-            // Kabir says he has sent his share. Until you say it landed, he
-            // still owes it — this is the claim waiting on you.
-            Settlement(fromId: kabir.id, toId: you.id, amount: 7500, utr: '447126558301', date: ago(1)),
-          ],
-        ),
-        Group(
-          name: 'Flat',
-          members: [you, dev, neha],
-          expenses: [
-            Expense(
-              description: 'Wifi',
-              amount: 1800,
-              payerId: dev.id,
-              shares: splitEqually(1800, [you.id, dev.id, neha.id]),
-              date: ago(4),
-            ),
-            Expense(
-              description: 'Groceries',
-              amount: 3200,
-              payerId: you.id,
-              shares: splitEqually(3200, [you.id, dev.id, neha.id]),
-              date: ago(1),
-            ),
-          ],
-        ),
-      ]);
-    lists
-      ..clear()
-      ..add(
-        NamedList(
-          name: 'Goa trip',
-          budget: 12000,
-          entries: [
-            ListEntry(name: 'Sunscreen', price: 650, done: true),
-            ListEntry(name: 'Beach towel', price: 900, done: true),
-            ListEntry(name: 'Sunglasses', price: 1800, done: true),
-            ListEntry(name: 'Flip-flops', price: 700, done: true),
-            ListEntry(name: 'Swim shorts', price: 1600),
-            ListEntry(name: 'Dry bag', price: 1200),
-            ListEntry(name: 'Snorkel set', price: 5400),
-          ],
+    final today = dayOf(now());
+
+    // ---- Flat: you owe ₹6,250, with the rent on a schedule.
+    final flat = Group(name: 'Flat');
+    final youFlat = Member(name: profile.name, isYou: true, upiId: profile.upiId);
+    final sahilFlat = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
+    final devFlat = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
+    flat.members.addAll([youFlat, sahilFlat, devFlat]);
+
+    final flatIds = flat.members.map((m) => m.id).toList();
+    final rent = Expense(
+      description: 'Rent',
+      amount: 24000,
+      payerId: sahilFlat.id,
+      shares: splitEqually(24000, flatIds),
+      date: addMonths(today, -1),
+    );
+    flat.expenses.addAll([
+      rent,
+      Expense(
+        description: 'Dinner at Naru',
+        amount: 5250,
+        payerId: youFlat.id,
+        shares: splitEqually(5250, flatIds),
+        date: today.subtract(const Duration(days: 9)),
+      ),
+      Expense(
+        description: 'Electricity',
+        amount: 5250,
+        payerId: devFlat.id,
+        shares: splitEqually(5250, flatIds),
+        date: today.subtract(const Duration(days: 4)),
+      ),
+    ]);
+    final rentSchedule = Recurring(
+      description: 'Rent',
+      amount: 24000,
+      payerId: sahilFlat.id,
+      shares: splitEqually(24000, flatIds),
+      frequency: Frequency.monthly,
+      nextDue: today,
+      lastAddedOn: dayOf(rent.date),
+    );
+    flat.recurring.addAll([
+      rentSchedule,
+      Recurring(
+        description: 'Wifi',
+        amount: 1299,
+        payerId: youFlat.id,
+        shares: splitEqually(1299, flatIds),
+        frequency: Frequency.monthly,
+        nextDue: today.add(const Duration(days: 6)),
+      ),
+    ]);
+    rent.recurringId = rentSchedule.id;
+
+    // ---- Goa trip: you get back ₹2,400, and Sahil says he has sent it.
+    final goa = Group(name: 'Goa trip');
+    final youGoa = Member(name: profile.name, isYou: true, upiId: profile.upiId);
+    final sahilGoa = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
+    final rituGoa = Member(name: 'Ritu Nair', upiId: 'ritu@okicici', userId: newId());
+    final devGoa = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
+    goa.members.addAll([youGoa, sahilGoa, rituGoa, devGoa]);
+
+    final goaIds = goa.members.map((m) => m.id).toList();
+    goa.expenses.addAll([
+      Expense(
+        description: 'Hotel',
+        amount: 16000,
+        payerId: youGoa.id,
+        shares: splitEqually(16000, goaIds),
+        date: today.subtract(const Duration(days: 21)),
+      ),
+      Expense(
+        description: 'Flights',
+        amount: 14400,
+        payerId: devGoa.id,
+        shares: splitEqually(14400, goaIds),
+        date: today.subtract(const Duration(days: 24)),
+      ),
+      Expense(
+        description: 'Food and the shack',
+        amount: 24000,
+        payerId: rituGoa.id,
+        shares: splitEqually(24000, goaIds),
+        date: today.subtract(const Duration(days: 19)),
+      ),
+    ]);
+    goa.settlements.add(
+      Settlement(
+        fromId: sahilGoa.id,
+        toId: youGoa.id,
+        amount: 2400,
+        utr: '429117338201',
+        date: today.subtract(const Duration(days: 1)),
+      ),
+    );
+
+    // ---- Sunday football: settled up.
+    final football = Group(name: 'Sunday football');
+    final youBall = Member(name: profile.name, isYou: true, upiId: profile.upiId);
+    final sahilBall = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
+    final devBall = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
+    football.members.addAll([youBall, sahilBall, devBall]);
+    final ballIds = football.members.map((m) => m.id).toList();
+    football.expenses.add(
+      Expense(
+        description: 'Turf',
+        amount: 2400,
+        payerId: youBall.id,
+        shares: splitEqually(2400, ballIds),
+        date: today.subtract(const Duration(days: 6)),
+      ),
+    );
+    for (final payer in [sahilBall, devBall]) {
+      football.settlements.add(
+        Settlement(
+          fromId: payer.id,
+          toId: youBall.id,
+          amount: 800,
+          status: SettlementStatus.confirmed,
+          date: today.subtract(const Duration(days: 5)),
+          confirmedAt: today.subtract(const Duration(days: 5)),
         ),
       );
-    notifyListeners();
-    _saveTimer = Timer(const Duration(milliseconds: 250), flush);
+    }
+
+    groups.addAll([football, goa, flat]);
+    _commit();
   }
+}
+
+/// One person and everything they owe you, netted across every ledger.
+class Owing {
+  const Owing({
+    required this.member,
+    required this.amount,
+    required this.groups,
+    this.lastNudgedAt,
+  });
+
+  final Member member;
+  final int amount;
+  final List<Group> groups;
+  final DateTime? lastNudgedAt;
 }
 
 /// Makes the store reachable from any widget and rebuilds dependents on change.

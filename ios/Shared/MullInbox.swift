@@ -10,30 +10,17 @@ enum MullInbox {
 
   /// What a share can leave behind.
   ///
-  /// `resolved` is the fast path: the user already said what this is in the
-  /// share sheet, so Mull files it on next launch without asking again. The
-  /// other three are the raw path, kept because a share the user did not stop
-  /// to triage is still worth keeping — Mull parses those on the way in.
+  /// One case, because there is one thing Mull can do with a share: read a UPI
+  /// receipt off a screenshot and settle the debt it pays. The share sheet does
+  /// not triage it — `kind` is still written so a queue left behind by an older
+  /// build drains without confusing the app rather than being mistaken for
+  /// something else.
   enum Entry {
-    case resolved(name: String, price: Int, isNeed: Bool, url: String?)
     case image(file: String)
-    case link(url: String)
-    case text(String)
 
     var json: [String: Any] {
       switch self {
-      case .resolved(let name, let price, let isNeed, let url):
-        var out: [String: Any] = [
-          "kind": "resolved",
-          "name": name,
-          "price": price,
-          "itemKind": isNeed ? "need" : "want",
-        ]
-        if let url { out["url"] = url }
-        return out
       case .image(let file): return ["kind": "image", "file": file]
-      case .link(let url): return ["kind": "link", "url": url]
-      case .text(let text): return ["kind": "text", "text": text]
       }
     }
   }

@@ -60,7 +60,19 @@ enum MullScreenshot {
 }
 
 extension UIImage {
-  /// Screenshots are always `.up`, but a photo of a price tag might not be.
+  /// Vision does not need full-resolution pixels, and the share extension
+  /// cannot afford to hold several screenshots' worth of them at once.
+  func mullDownscaled(maxDimension: CGFloat) -> UIImage {
+    let longest = max(size.width, size.height)
+    guard longest > maxDimension else { return self }
+    let scale = maxDimension / longest
+    let target = CGSize(width: size.width * scale, height: size.height * scale)
+    return UIGraphicsImageRenderer(size: target).image { _ in
+      draw(in: CGRect(origin: .zero, size: target))
+    }
+  }
+
+  /// Screenshots are always `.up`, but a photo of a receipt might not be.
   var mullOrientation: CGImagePropertyOrientation {
     switch imageOrientation {
     case .up: return .up

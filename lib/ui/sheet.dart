@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:ui';
 
+import 'package:flutter/cupertino.dart' show CupertinoDatePicker, CupertinoDatePickerMode, CupertinoTheme, CupertinoThemeData, CupertinoTextThemeData;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -358,7 +359,7 @@ class _ToastViewState extends State<_ToastView> with SingleTickerProviderStateMi
     return Positioned(
       left: 22,
       right: 22,
-      bottom: (bottomSafe > 0 ? 26 : 14) + 68 + 12,
+      bottom: (bottomSafe > 0 ? 28 : 20) + 12,
       child: FadeTransition(
         opacity: curve,
         child: SlideTransition(
@@ -409,4 +410,58 @@ class _ToastViewState extends State<_ToastView> with SingleTickerProviderStateMi
       ),
     );
   }
+}
+
+// ----------------------------------------------------------------- date picker
+
+/// A date, picked in a Mull-shaped sheet.
+///
+/// Cupertino's wheel rather than a calendar grid: every date Mull asks for is
+/// near today — when an expense happened, when rent starts — and a wheel gets
+/// to "three days ago" in one flick.
+Future<DateTime?> showMullDatePicker(
+  BuildContext context, {
+  required DateTime initial,
+  required DateTime first,
+  required DateTime last,
+  String title = 'Pick a date',
+}) {
+  var chosen = DateTime(initial.year, initial.month, initial.day);
+  return showMullSheet<DateTime>(
+    context,
+    fitContent: true,
+    builder: (sheet) => Padding(
+      padding: const EdgeInsets.fromLTRB(22, 4, 22, 26),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SheetHeader(title),
+          SizedBox(
+            height: 216,
+            child: CupertinoTheme(
+              data: CupertinoThemeData(
+                brightness: sheet.c.isDark ? Brightness.dark : Brightness.light,
+                textTheme: CupertinoTextThemeData(
+                  dateTimePickerTextStyle: excon(20, color: sheet.c.ink),
+                ),
+              ),
+              child: CupertinoDatePicker(
+                mode: CupertinoDatePickerMode.date,
+                initialDateTime: chosen,
+                minimumDate: DateTime(first.year, first.month, first.day),
+                maximumDate: DateTime(last.year, last.month, last.day),
+                onDateTimeChanged: (d) => chosen = DateTime(d.year, d.month, d.day),
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: PillButton('Use this date', onTap: () => Navigator.of(sheet).pop(chosen)),
+          ),
+        ],
+      ),
+    ),
+  );
 }

@@ -133,11 +133,14 @@ class Glass extends StatelessWidget {
 // -------------------------------------------------------------------- buttons
 
 class PillButton extends StatelessWidget {
-  const PillButton(this.label, {super.key, this.onTap, this.busy = false});
+  const PillButton(this.label, {super.key, this.onTap, this.busy = false, this.glyph});
 
   final String label;
   final VoidCallback? onTap;
   final bool busy;
+
+  /// Optional leading mark — the "+" on "Start a group".
+  final MullGlyph? glyph;
 
   @override
   Widget build(BuildContext context) {
@@ -158,7 +161,16 @@ class PillButton extends StatelessWidget {
                   dimension: 18,
                   child: CircularProgressIndicator(strokeWidth: 1.6, color: c.pillInk),
                 )
-              : Text(label, style: ranade(15.5, color: c.pillInk)),
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (glyph != null) ...[
+                      MullIcon(glyph!, size: 19, color: c.pillInk, strokeWidth: 1.9),
+                      const SizedBox(width: 12),
+                    ],
+                    Text(label, style: ranade(15.5, color: c.pillInk)),
+                  ],
+                ),
         ),
       ),
     );
@@ -621,6 +633,57 @@ class Segmented extends StatelessWidget {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------- chips
+
+class NameChip extends StatelessWidget {
+  const NameChip(this.label, {super.key, this.selected = false, this.onTap, this.onRemove, this.detail});
+
+  final String label;
+  final String? detail;
+  final bool selected;
+  final VoidCallback? onTap;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    return Pressable(
+      onTap: onTap,
+      scale: .95,
+      child: AnimatedContainer(
+        duration: motion(context, const Duration(milliseconds: 200)),
+        height: 40,
+        padding: EdgeInsets.only(left: 16, right: onRemove == null ? 16 : 4),
+        decoration: BoxDecoration(
+          color: selected ? c.pill : c.pill.withValues(alpha: 0),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: selected ? c.pill : c.line),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(label, style: ranade(14, color: selected ? c.pillInk : c.ink2)),
+            if (detail != null) ...[
+              const SizedBox(width: 8),
+              Text(detail!, style: excon(13, color: selected ? c.pillInk : c.ink3)),
+            ],
+            if (onRemove != null)
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onRemove,
+                child: SizedBox(
+                  width: 34,
+                  height: 40,
+                  child: Center(child: MullIcon(MullGlyph.close, size: 13, color: c.ink3, strokeWidth: 2)),
+                ),
+              ),
+          ],
         ),
       ),
     );

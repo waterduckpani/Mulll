@@ -5,11 +5,11 @@
 /// they get told what this is first, and the address is asked for as the second
 /// step of something they have already decided to do.
 ///
-/// Welcome → email → code → name → UPI → budget → friends.
+/// Welcome → email → code → name → UPI → friends.
 ///
-/// The flow is also the way back in for someone who has signed out: they have
-/// a name and a budget already, so it starts at the email step and the root
-/// swaps it away the moment the session comes back.
+/// The flow is also the way back in for someone who has signed out: they have a
+/// name already, so it starts at the email step and the root swaps it away the
+/// moment the session comes back.
 library;
 
 import 'dart:async';
@@ -23,7 +23,11 @@ import '../data/store.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
 
-enum _Step { welcome, email, code, name, upi, budget, friends }
+enum _Step { welcome, email, code, name, upi, friends }
+
+/// The steps that carry a number. Welcome and the friends screen sit outside
+/// the count — one is a statement, the other is already past the finish line.
+const _counted = [_Step.email, _Step.code, _Step.name, _Step.upi];
 
 class OnboardingFlow extends StatefulWidget {
   const OnboardingFlow({super.key});
@@ -37,40 +41,35 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   final _code = TextEditingController();
   final _name = TextEditingController();
   final _upi = TextEditingController();
-  final _budget = AmountController();
 
   final _emailFocus = FocusNode();
   final _codeFocus = FocusNode();
   final _nameFocus = FocusNode();
   final _upiFocus = FocusNode();
-  final _budgetFocus = FocusNode();
 
   late _Step _step;
   bool _busy = false;
   String? _error;
 
-  /// Someone signing back in after a sign-out. They keep their name and budget,
-  /// so the flow is only the two sign-in steps and the root takes over after.
+  /// Someone signing back in after a sign-out. They keep their name, so the
+  /// flow is only the two sign-in steps and the root takes over after.
   late final bool _returning = context.readStore.profile.onboarded;
 
   @override
   void initState() {
     super.initState();
     _step = _returning ? _Step.email : _Step.welcome;
-    for (final c in [_email, _code, _name, _upi, _budget]) {
+    for (final c in [_email, _code, _name, _upi]) {
       c.addListener(() => setState(() {}));
     }
-    _budgetFocus.addListener(() {
-      if (!_budgetFocus.hasFocus) _budget.tidy();
-    });
   }
 
   @override
   void dispose() {
-    for (final c in [_email, _code, _name, _upi, _budget]) {
+    for (final c in [_email, _code, _name, _upi]) {
       c.dispose();
     }
-    for (final f in [_emailFocus, _codeFocus, _nameFocus, _upiFocus, _budgetFocus]) {
+    for (final f in [_emailFocus, _codeFocus, _nameFocus, _upiFocus]) {
       f.dispose();
     }
     super.dispose();
@@ -126,15 +125,13 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     if (!_returning) _goTo(_Step.name, focus: _nameFocus);
   }
 
-  /// Name, UPI and budget are saved together at the end rather than one screen
-  /// at a time: a half-finished profile that stops existing when the app is
-  /// killed is worse than no profile at all.
+  /// Name and UPI are saved together at the end rather than one screen at a
+  /// time: a half-finished profile that stops existing when the app is killed
+  /// is worse than no profile at all.
   void _finish() {
-    final budget = _budget.amount;
-    if (budget == null) return;
     final store = context.readStore;
     final upi = _upi.text.trim();
-    store.completeOnboarding(name: _name.text, budget: budget);
+    store.completeOnboarding(name: _name.text);
     if (upi.isNotEmpty) store.updateProfile((p) => p.upiId = upi);
     unawaited(AuthService.saveProfile(name: _name.text, upiId: upi));
     HapticFeedback.heavyImpact();
@@ -159,47 +156,43 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
 
   // ------------------------------------------------------------------ steps
 
-  ({String? eyebrow, String title, String body}) get _copy => switch (_step) {
-    _Step.welcome => (eyebrow: null, title: '', body: ''),
-    _Step.email => (
-      eyebrow: 'Step 1 of 5',
-      title: 'Where should we reach you?',
-      body:
-          'We\'ll email you a six-digit code. There is no password to remember, '
-          'and this is the address friends use to add you to a group.',
-    ),
-    _Step.code => (
-      eyebrow: 'Step 2 of 5',
-      title: 'Check your email.',
-      body: 'We sent a six-digit code to ${_email.text.trim()}.',
-    ),
-    _Step.name => (
-      eyebrow: 'Step 3 of 5',
-      title: 'What should we call you?',
-      body: 'This is the name people see next to your share of a bill.',
-    ),
-    _Step.upi => (
-      eyebrow: 'Step 4 of 5',
-      title: 'Your UPI ID?',
-      body:
-          'So people can pay you back in one tap instead of asking for it every '
-          'time. You can add it later if you don\'t know it offhand.',
-    ),
-    _Step.budget => (
-      eyebrow: 'Step 5 of 5',
-      title: 'What can you put towards things each month?',
-      body:
-          'Mull measures everything you want against this. You can change it '
-          'whenever it changes.',
-    ),
-    _Step.friends => (
-      eyebrow: 'You\'re set',
-      title: 'Better with people in it.',
-      body:
-          'Mull is most useful when the people you actually split with are on '
-          'it too. Invite a couple now, or get on with it and do this later.',
-    ),
-  };
+  ({String? eyebrow, String title, String body}) get _copy {
+    final n = _counted.indexOf(_step) + 1;
+    return switch (_step) {
+      _Step.welcome => (eyebrow: null, title: '', body: ''),
+      _Step.email => (
+        eyebrow: 'Step $n of 4',
+        title: 'Where should we reach you?',
+        body:
+            "We'll email you a six-digit code. There is no password to remember, "
+            'and this is the address friends use to add you to a group.',
+      ),
+      _Step.code => (
+        eyebrow: 'Step $n of 4',
+        title: 'Check your email.',
+        body: 'We sent a six-digit code to ${_email.text.trim()}.',
+      ),
+      _Step.name => (
+        eyebrow: 'Step $n of 4',
+        title: 'What should we call you?',
+        body: 'This is the name people see next to your share of a bill.',
+      ),
+      _Step.upi => (
+        eyebrow: 'Step $n of 4',
+        title: 'Your UPI ID?',
+        body:
+            'So people can pay you back in one tap instead of asking for it every '
+            "time. You can add it later if you don't know it offhand.",
+      ),
+      _Step.friends => (
+        eyebrow: "You're set",
+        title: 'Better with people in it.',
+        body:
+            'Mull is most useful when the people you actually split with are on '
+            'it too. Invite a couple now, or get on with it and do this later.',
+      ),
+    };
+  }
 
   Widget? get _field => switch (_step) {
     _Step.email => BigField(
@@ -230,14 +223,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       focusNode: _upiFocus,
       size: 22,
       hint: 'name@bank',
-      onSubmitted: (_) => _goTo(_Step.budget, focus: _budgetFocus),
-    ),
-    _Step.budget => BigField(
-      controller: _budget,
-      focusNode: _budgetFocus,
-      numeric: true,
-      hint: '₹0',
-      onSubmitted: (_) => _canAdvance ? _finish() : null,
+      onSubmitted: (_) => _finish(),
     ),
     _ => null,
   };
@@ -251,7 +237,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     // and blocking setup on it would lose people over a string they can paste
     // in thirty seconds from the profile screen.
     _Step.upi => true,
-    _Step.budget => _budget.amount != null,
   };
 
   (String, VoidCallback?) get _cta => switch (_step) {
@@ -259,11 +244,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     _Step.email => (_busy ? 'Sending…' : 'Send me a code', _busy ? null : _sendCode),
     _Step.code => (_busy ? 'One moment…' : 'Continue', _busy ? null : _verify),
     _Step.name => ('Continue', () => _goTo(_Step.upi, focus: _upiFocus)),
-    _Step.upi => (
-      _upi.text.trim().isEmpty ? 'Skip for now' : 'Continue',
-      () => _goTo(_Step.budget, focus: _budgetFocus),
-    ),
-    _Step.budget => ('Continue', _finish),
+    _Step.upi => (_upi.text.trim().isEmpty ? 'Skip for now' : 'Continue', _finish),
     _Step.friends => ('Invite friends', _inviteFriends),
   };
 
@@ -278,7 +259,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     // The welcome screen is the only one that is a statement rather than a
     // question, so it gets the whole canvas and no progress dots.
     final body = onWelcome
-        ? _Welcome(key: const ValueKey('welcome'))
+        ? const _Welcome(key: ValueKey('welcome'))
         : Column(
             key: ValueKey(_step),
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -378,7 +359,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     _Step.email => _returning ? null : () => _goTo(_Step.welcome),
     _Step.code => () => _goTo(_Step.email, focus: _emailFocus),
     _Step.upi => () => _goTo(_Step.name, focus: _nameFocus),
-    _Step.budget => () => _goTo(_Step.upi, focus: _upiFocus),
     _ => null,
   };
 }
@@ -389,21 +369,10 @@ class _TopBar extends StatelessWidget {
   final _Step step;
   final VoidCallback? onBack;
 
-  /// Which of the five numbered steps this is, or null on welcome and the
-  /// friends screen, which sit outside the count.
-  int? get _index => switch (step) {
-    _Step.email => 0,
-    _Step.code => 1,
-    _Step.name => 2,
-    _Step.upi => 3,
-    _Step.budget => 4,
-    _ => null,
-  };
-
   @override
   Widget build(BuildContext context) {
     final c = context.c;
-    final index = _index;
+    final index = _counted.indexOf(step);
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
       child: SizedBox(
@@ -429,8 +398,8 @@ class _TopBar extends StatelessWidget {
                 ),
               ),
             const Spacer(),
-            if (index != null)
-              for (var i = 0; i < 5; i++)
+            if (index >= 0)
+              for (var i = 0; i < _counted.length; i++)
                 AnimatedContainer(
                   duration: const Duration(milliseconds: 300),
                   margin: const EdgeInsets.only(left: 6),
@@ -471,15 +440,16 @@ class _Welcome extends StatelessWidget {
         ),
         const SizedBox(height: 28),
         Text(
-          'Buy what fits.\nWait on what doesn\'t.',
+          'Who paid.\nWho owes.\nSorted.',
           style: excon(35, tracking: -.02, height: 1.24, color: c.ink),
         ),
         const SizedBox(height: 22),
         ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 300),
           child: Text(
-            'A wishlist that knows your budget. Needs come first, wants wait '
-            'their turn, and groups keep track of who is putting in what.',
+            'Split the flat, the trip and the table. Mull works out the fewest '
+            'payments that clear it, and the money moves over UPI — never '
+            'through us.',
             style: ranade(14, height: 1.7, color: c.ink3),
           ),
         ),

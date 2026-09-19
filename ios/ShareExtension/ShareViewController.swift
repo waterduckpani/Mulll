@@ -1,40 +1,33 @@
 import UIKit
 import UniformTypeIdentifiers
 
-/// Triage in the share sheet, so nothing has to be sorted out later.
+/// Share a UPI receipt into Mull and the debt it pays off settles itself.
 ///
-/// The old version was a dumb pipe: it queued the raw share, said "Saved to
-/// Mull" and left the actual decisions for whenever the app was next opened —
-/// by which point nobody remembers which of twenty screenshots was the one they
-/// actually wanted. Now the reading happens here, on-device, and the only
-/// things asked of the user are the two it cannot guess: is this a need or a
-/// want, and is the price right.
+/// This is the loop that makes "I already sent it" mean something. You pay Sahil
+/// in GPay, share the confirmation screen here, and the claim reaches him
+/// carrying the amount and the reference off the payment itself — so the person
+/// owed is confirming evidence rather than taking your word for it.
 ///
-/// Speed is still the whole point. Nothing blocks on the network, the OCR runs
-/// on a downscaled copy, and a share the user abandons leaves nothing behind.
+/// The extension reads the screenshot but never decides anything. Vision runs
+/// here because the share sheet has no Flutter engine and never will — the user
+/// is two taps from the back button and waiting on us. What it reads is shown
+/// back for confirmation; `UpiReceiptReader` in Dart, which has the test suite,
+/// is what actually matches a receipt to a debt when Mull next opens.
 final class ShareViewController: UIViewController {
-  /// One shared thing, as far as it has been worked out.
+  /// One shared screenshot, as far as it has been worked out.
   private struct Draft {
-    var name: String
-    var price: Int?
-    var isNeed: Bool
-    var url: String?
-    var image: UIImage?
-    /// JPEG kept only so an untriaged draft can still be queued for the app.
-    var imageData: Data?
+    var image: UIImage
+    /// JPEG, written to the App Group only at save.
+    var data: Data
+    var guess: MullReceiptGuess.Result
   }
 
   private var drafts: [Draft] = []
   private let table = UITableView(frame: .zero, style: .plain)
   private let spinner = UIActivityIndicatorView(style: .medium)
   private let titleLabel = UILabel()
+  private let subtitleLabel = UILabel()
   private let saveButton = UIButton(type: .system)
-
-  /// Whatever the last share chose, so a browsing session is mostly one tap.
-  /// Kept in the App Group rather than the extension's own defaults, which iOS
-  /// is free to throw away whenever it unloads us.
-  private static let lastKindKey = "mull.share.lastKindIsNeed"
-  private static let defaults = UserDefaults(suiteName: MullInbox.appGroup) ?? .standard
 
   // ----------------------------------------------------------------- lifecycle
 
@@ -60,14 +53,12 @@ final class ShareViewController: UIViewController {
     // Index-keyed so the order the user selected in Photos survives the
     // concurrent loads below.
     var found: [Int: Draft] = [:]
-    var pageURL: String?
 
     for (index, provider) in attachments.enumerated() {
       group.enter()
-      load(provider) { draft, url in
+      load(provider) { draft in
         lock.lock()
         if let draft { found[index] = draft }
-        if let url { pageURL = url }
         lock.unlock()
         group.leave()
       }
@@ -75,124 +66,71 @@ final class ShareViewController: UIViewController {
 
     group.notify(queue: .main) { [weak self] in
       guard let self else { return }
-      var drafts = found.sorted { $0.key < $1.key }.map(\.value)
-
-      // Safari hands over the page URL and a preview image for the same page.
-      // The image is the richer read, so it wins — but the link is still worth
-      // keeping on it, since that is what "Open zara.com" will use later.
-      if let pageURL, drafts.contains(where: { $0.image != nil }) {
-        drafts = drafts.filter { $0.image != nil }
-        if drafts.count == 1 { drafts[0].url = pageURL }
-      }
-
-      self.drafts = drafts
+      self.drafts = found.sorted { $0.key < $1.key }.map(\.value)
       self.didFinishReading()
     }
   }
 
-  private func load(_ provider: NSItemProvider, completion: @escaping (Draft?, String?) -> Void) {
-    let defaultIsNeed = Self.defaults.bool(forKey: Self.lastKindKey)
-
-    if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-      provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
-        guard let data, let image = UIImage(data: data) else {
-          completion(nil, nil)
-          return
-        }
-        // Full-resolution screenshots would put twenty of these in memory at
-        // once; Vision does not need the pixels and the extension cannot
-        // afford them.
-        let small = image.mullDownscaled(maxDimension: 1600)
-        guard let cgImage = small.cgImage else {
-          completion(nil, nil)
-          return
-        }
-        let guess = MullProductGuess.read(MullScreenshot.lines(cgImage, orientation: small.mullOrientation))
-        completion(
-          Draft(
-            name: guess.name ?? "",
-            price: guess.price,
-            isNeed: defaultIsNeed,
-            url: nil,
-            image: small,
-            imageData: small.jpegData(compressionQuality: 0.8)
-          ),
-          nil
-        )
-      }
+  private func load(_ provider: NSItemProvider, completion: @escaping (Draft?) -> Void) {
+    // Only images now. A shared link or a line of text has nowhere to go in a
+    // split app, and queueing one so Mull can silently drop it later is worse
+    // than declining it here.
+    guard provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) else {
+      completion(nil)
       return
     }
 
-    if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
-      provider.loadItem(forTypeIdentifier: UTType.url.identifier) { item, _ in
-        guard let url = item as? URL, url.scheme?.hasPrefix("http") == true else {
-          completion(nil, nil)
-          return
-        }
-        // No title yet — reading the page would mean a network round trip the
-        // share sheet cannot afford. Mull fills it in when it opens.
-        completion(
-          Draft(name: "", price: nil, isNeed: defaultIsNeed, url: url.absoluteString, image: nil, imageData: nil),
-          url.absoluteString
-        )
+    provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+      guard let data, let image = UIImage(data: data) else {
+        completion(nil)
+        return
       }
-      return
-    }
-
-    if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
-      provider.loadItem(forTypeIdentifier: UTType.plainText.identifier) { item, _ in
-        guard let text = (item as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-          completion(nil, nil)
-          return
-        }
-        completion(
-          Draft(name: text, price: nil, isNeed: defaultIsNeed, url: nil, image: nil, imageData: nil),
-          nil
-        )
+      // Full-resolution screenshots would put several of these in memory at
+      // once; Vision does not need the pixels and the extension cannot afford
+      // them.
+      let small = image.mullDownscaled(maxDimension: 1600)
+      guard let cgImage = small.cgImage, let jpeg = small.jpegData(compressionQuality: 0.8) else {
+        completion(nil)
+        return
       }
-      return
+      let guess = MullReceiptGuess.read(MullScreenshot.lines(cgImage, orientation: small.mullOrientation))
+      completion(Draft(image: small, data: jpeg, guess: guess))
     }
-
-    completion(nil, nil)
   }
 
   private func didFinishReading() {
     spinner.stopAnimating()
     guard !drafts.isEmpty else {
-      finish(saved: false)
+      showNothingToDo()
       return
     }
-    titleLabel.text = drafts.count == 1
-      ? "Add this to Mull"
-      : "Add \(drafts.count) things to Mull"
+
+    let payments = drafts.filter { $0.guess.looksLikePayment && !$0.guess.failed }
+    titleLabel.text = drafts.count == 1 ? "Send this to Mull" : "Send \(drafts.count) to Mull"
+    subtitleLabel.text = payments.isEmpty
+      ? "Mull will check it against what you owe when you open it."
+      : "Mull will match it to what you owe and record the payment."
+    subtitleLabel.isHidden = false
     saveButton.isHidden = false
     table.isHidden = false
     table.reloadData()
-    updateSaveButton()
+    saveButton.setTitle(drafts.count == 1 ? "Send it" : "Send all \(drafts.count)", for: .normal)
+  }
+
+  /// Someone shared a link or a note. Say so rather than appearing to save it.
+  private func showNothingToDo() {
+    titleLabel.text = "Mull takes screenshots"
+    subtitleLabel.text = "Share a UPI payment screen and Mull will settle the debt it pays off."
+    subtitleLabel.isHidden = false
+    saveButton.isHidden = true
   }
 
   // ---------------------------------------------------------------------- save
 
   @objc private func save() {
-    view.endEditing(true)
-
     let entries: [MullInbox.Entry] = drafts.compactMap { draft in
-      let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-      // Everything answered — file it and the app adds it without asking.
-      if !name.isEmpty, let price = draft.price, price > 0 {
-        return .resolved(name: name, price: price, isNeed: draft.isNeed, url: draft.url)
-      }
-      // Something is still missing. Rather than drop it, hand the raw share
-      // over and let Mull's own parser and add sheet finish the job.
-      if let data = draft.imageData, let file = MullInbox.writeImage(data) {
-        return .image(file: file)
-      }
-      if let url = draft.url { return .link(url: url) }
-      return name.isEmpty ? nil : .text(name)
-    }
-
-    if let first = drafts.first {
-      Self.defaults.set(first.isNeed, forKey: Self.lastKindKey)
+      guard let file = MullInbox.writeImage(draft.data) else { return nil }
+      return .image(file: file)
     }
     finish(saved: MullInbox.append(entries))
   }
@@ -201,19 +139,6 @@ final class ShareViewController: UIViewController {
     // Nothing was written to the container, so backing out really does leave
     // no trace — images are only persisted at save.
     extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
-  }
-
-  private func updateSaveButton() {
-    let ready = drafts.filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && ($0.price ?? 0) > 0 }
-    let title: String
-    if drafts.count == 1 {
-      title = ready.isEmpty ? "Save, sort later" : "Save it"
-    } else if ready.count == drafts.count {
-      title = "Save all \(drafts.count)"
-    } else {
-      title = "Save \(drafts.count) · \(ready.count) ready"
-    }
-    saveButton.setTitle(title, for: .normal)
   }
 
   private func finish(saved: Bool) {
@@ -229,220 +154,183 @@ final class ShareViewController: UIViewController {
     view.backgroundColor = MullPalette.screen
 
     titleLabel.text = "Reading…"
-    titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
-    titleLabel.textColor = MullPalette.ink3
-    titleLabel.translatesAutoresizingMaskIntoConstraints = false
+    titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
+    titleLabel.textColor = MullPalette.ink
+    titleLabel.numberOfLines = 2
 
-    let close = UIButton(type: .system)
-    close.setImage(UIImage(systemName: "xmark"), for: .normal)
-    close.tintColor = MullPalette.ink3
-    close.addTarget(self, action: #selector(cancel), for: .touchUpInside)
-    close.translatesAutoresizingMaskIntoConstraints = false
+    subtitleLabel.font = .systemFont(ofSize: 13)
+    subtitleLabel.textColor = MullPalette.ink3
+    subtitleLabel.numberOfLines = 3
+    subtitleLabel.isHidden = true
 
-    spinner.color = MullPalette.ink3
-    spinner.translatesAutoresizingMaskIntoConstraints = false
-    spinner.startAnimating()
+    let cancelButton = UIButton(type: .system)
+    cancelButton.setTitle("Cancel", for: .normal)
+    cancelButton.setTitleColor(MullPalette.ink3, for: .normal)
+    cancelButton.titleLabel?.font = .systemFont(ofSize: 15)
+    cancelButton.addTarget(self, action: #selector(cancel), for: .touchUpInside)
 
-    table.backgroundColor = .clear
-    table.separatorStyle = .none
-    table.dataSource = self
-    table.keyboardDismissMode = .interactive
-    table.rowHeight = UITableView.automaticDimension
-    table.estimatedRowHeight = 168
-    table.register(DraftCell.self, forCellReuseIdentifier: DraftCell.reuseID)
-    table.isHidden = true
-    table.translatesAutoresizingMaskIntoConstraints = false
-
-    saveButton.backgroundColor = MullPalette.pill
     saveButton.setTitleColor(MullPalette.pillInk, for: .normal)
-    saveButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .medium)
+    saveButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+    saveButton.backgroundColor = MullPalette.pill
     saveButton.layer.cornerRadius = 28
-    saveButton.addTarget(self, action: #selector(save), for: .touchUpInside)
     saveButton.isHidden = true
-    saveButton.translatesAutoresizingMaskIntoConstraints = false
+    saveButton.addTarget(self, action: #selector(save), for: .touchUpInside)
 
-    view.addSubview(titleLabel)
-    view.addSubview(close)
-    view.addSubview(spinner)
-    view.addSubview(table)
-    view.addSubview(saveButton)
+    table.dataSource = self
+    table.separatorStyle = .none
+    table.backgroundColor = .clear
+    table.rowHeight = UITableView.automaticDimension
+    table.estimatedRowHeight = 96
+    table.isHidden = true
+    table.register(ReceiptCell.self, forCellReuseIdentifier: ReceiptCell.id)
+
+    for subview in [titleLabel, subtitleLabel, cancelButton, saveButton, table, spinner] as [UIView] {
+      subview.translatesAutoresizingMaskIntoConstraints = false
+      view.addSubview(subview)
+    }
+    spinner.startAnimating()
 
     let guide = view.safeAreaLayoutGuide
     NSLayoutConstraint.activate([
-      titleLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 26),
-      titleLabel.topAnchor.constraint(equalTo: guide.topAnchor, constant: 18),
+      cancelButton.topAnchor.constraint(equalTo: guide.topAnchor, constant: 12),
+      cancelButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 20),
 
-      close.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -20),
-      close.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-      close.widthAnchor.constraint(equalToConstant: 44),
-      close.heightAnchor.constraint(equalToConstant: 44),
+      titleLabel.topAnchor.constraint(equalTo: cancelButton.bottomAnchor, constant: 18),
+      titleLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 24),
+      titleLabel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -24),
+
+      subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+      subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+      subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+      table.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 18),
+      table.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+      table.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+      table.bottomAnchor.constraint(equalTo: saveButton.topAnchor, constant: -12),
+
+      saveButton.heightAnchor.constraint(equalToConstant: 56),
+      saveButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 20),
+      saveButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -20),
+      saveButton.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -16),
 
       spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
       spinner.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-
-      table.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 14),
-      table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      table.bottomAnchor.constraint(equalTo: saveButton.topAnchor, constant: -12),
-
-      saveButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 22),
-      saveButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -22),
-      saveButton.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -16),
-      saveButton.heightAnchor.constraint(equalToConstant: 56),
     ])
   }
 }
 
-// ------------------------------------------------------------------ table data
-
 extension ShareViewController: UITableViewDataSource {
-  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-    drafts.count
-  }
+  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { drafts.count }
 
   func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-    let cell = tableView.dequeueReusableCell(withIdentifier: DraftCell.reuseID, for: indexPath) as! DraftCell
+    let cell = tableView.dequeueReusableCell(withIdentifier: ReceiptCell.id, for: indexPath) as! ReceiptCell
     let draft = drafts[indexPath.row]
-    cell.configure(name: draft.name, price: draft.price, isNeed: draft.isNeed, image: draft.image)
-    cell.onChange = { [weak self] name, price, isNeed in
-      guard let self, indexPath.row < drafts.count else { return }
-      drafts[indexPath.row].name = name
-      drafts[indexPath.row].price = price
-      drafts[indexPath.row].isNeed = isNeed
-      updateSaveButton()
-    }
+    cell.configure(image: draft.image, guess: draft.guess)
     return cell
   }
 }
 
-// ------------------------------------------------------------------------ cell
-
-/// One shared thing: what we read, and the two answers only the user has.
-private final class DraftCell: UITableViewCell {
-  static let reuseID = "draft"
-
-  var onChange: ((String, Int?, Bool) -> Void)?
+/// What Mull thinks it is looking at, with the screenshot beside it.
+///
+/// Nothing here is editable, and that is the point: this screen is not asking
+/// the user to enter a payment, it is showing them what they shared so they can
+/// tell at a glance that it is the right one. The numbers that matter are read
+/// again, properly, inside the app.
+private final class ReceiptCell: UITableViewCell {
+  static let id = "receipt"
 
   private let card = UIView()
   private let thumb = UIImageView()
-  private let nameField = UITextField()
-  private let priceField = UITextField()
-  private let kind = UISegmentedControl(items: ["Need", "Want"])
+  private let amountLabel = UILabel()
+  private let detailLabel = UILabel()
 
   override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
     super.init(style: style, reuseIdentifier: reuseIdentifier)
     backgroundColor = .clear
     selectionStyle = .none
-    build()
+
+    card.backgroundColor = MullPalette.card
+    card.layer.cornerRadius = 24
+    card.layer.borderWidth = 1
+
+    thumb.contentMode = .scaleAspectFill
+    thumb.clipsToBounds = true
+    thumb.layer.cornerRadius = 14
+
+    amountLabel.font = .systemFont(ofSize: 22, weight: .semibold)
+    amountLabel.textColor = MullPalette.ink
+
+    detailLabel.font = .systemFont(ofSize: 13)
+    detailLabel.textColor = MullPalette.ink3
+    detailLabel.numberOfLines = 2
+
+    for subview in [card, thumb, amountLabel, detailLabel] as [UIView] {
+      subview.translatesAutoresizingMaskIntoConstraints = false
+    }
+    contentView.addSubview(card)
+    for subview in [thumb, amountLabel, detailLabel] {
+      card.addSubview(subview)
+    }
+
+    NSLayoutConstraint.activate([
+      card.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
+      card.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+      card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+      card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+
+      thumb.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+      thumb.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+      thumb.bottomAnchor.constraint(lessThanOrEqualTo: card.bottomAnchor, constant: -14),
+      thumb.widthAnchor.constraint(equalToConstant: 56),
+      thumb.heightAnchor.constraint(equalToConstant: 72),
+
+      amountLabel.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: 16),
+      amountLabel.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+      amountLabel.topAnchor.constraint(equalTo: card.topAnchor, constant: 22),
+
+      detailLabel.leadingAnchor.constraint(equalTo: amountLabel.leadingAnchor),
+      detailLabel.trailingAnchor.constraint(equalTo: amountLabel.trailingAnchor),
+      detailLabel.topAnchor.constraint(equalTo: amountLabel.bottomAnchor, constant: 6),
+      detailLabel.bottomAnchor.constraint(lessThanOrEqualTo: card.bottomAnchor, constant: -18),
+    ])
   }
 
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
   /// A `cgColor` is resolved once, so the border would keep the appearance it
-  /// was built in if the user flipped to dark mode mid-share.
+  /// was first drawn in unless it is refreshed when the trait changes.
   override func traitCollectionDidChange(_ previous: UITraitCollection?) {
     super.traitCollectionDidChange(previous)
     card.layer.borderColor = MullPalette.line.resolvedColor(with: traitCollection).cgColor
   }
 
-  func configure(name: String, price: Int?, isNeed: Bool, image: UIImage?) {
-    nameField.text = name
-    priceField.text = price.map { "\($0)" } ?? ""
-    kind.selectedSegmentIndex = isNeed ? 0 : 1
+  func configure(image: UIImage, guess: MullReceiptGuess.Result) {
     thumb.image = image
-    thumb.isHidden = image == nil
-  }
+    amountLabel.text = guess.amount.map { "₹\(grouped($0))" } ?? "Screenshot"
 
-  @objc private func changed() {
-    let price = Int(priceField.text?.filter(\.isNumber) ?? "")
-    onChange?(nameField.text ?? "", price, kind.selectedSegmentIndex == 0)
-  }
-
-  private func build() {
-    card.backgroundColor = MullPalette.card
-    card.layer.cornerRadius = 26
-    card.layer.borderWidth = 1
-    card.layer.borderColor = MullPalette.line.cgColor
-    card.translatesAutoresizingMaskIntoConstraints = false
-
-    thumb.contentMode = .scaleAspectFill
-    thumb.clipsToBounds = true
-    thumb.layer.cornerRadius = 12
-    thumb.translatesAutoresizingMaskIntoConstraints = false
-
-    style(nameField, placeholder: "What's it called?", size: 17)
-    style(priceField, placeholder: "₹0", size: 17)
-    priceField.keyboardType = .numberPad
-    priceField.textAlignment = .right
-
-    kind.selectedSegmentTintColor = MullPalette.pill
-    kind.setTitleTextAttributes([.foregroundColor: MullPalette.pillInk], for: .selected)
-    kind.setTitleTextAttributes([.foregroundColor: MullPalette.ink2], for: .normal)
-    kind.addTarget(self, action: #selector(changed), for: .valueChanged)
-    kind.translatesAutoresizingMaskIntoConstraints = false
-
-    let fields = UIStackView(arrangedSubviews: [nameField, priceField])
-    fields.axis = .horizontal
-    fields.spacing = 12
-    fields.alignment = .firstBaseline
-    priceField.setContentHuggingPriority(.required, for: .horizontal)
-    priceField.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-    let rule = UIView()
-    rule.backgroundColor = MullPalette.line
-    rule.translatesAutoresizingMaskIntoConstraints = false
-
-    let column = UIStackView(arrangedSubviews: [fields, rule, kind])
-    column.axis = .vertical
-    column.spacing = 14
-    column.setCustomSpacing(10, after: fields)
-    column.translatesAutoresizingMaskIntoConstraints = false
-
-    contentView.addSubview(card)
-    card.addSubview(thumb)
-    card.addSubview(column)
-
-    NSLayoutConstraint.activate([
-      card.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
-      card.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
-      card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22),
-      card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -22),
-
-      thumb.topAnchor.constraint(equalTo: card.topAnchor, constant: 18),
-      thumb.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
-      thumb.widthAnchor.constraint(equalToConstant: 52),
-      thumb.heightAnchor.constraint(equalToConstant: 52),
-
-      column.topAnchor.constraint(equalTo: card.topAnchor, constant: 18),
-      column.leadingAnchor.constraint(equalTo: thumb.trailingAnchor, constant: 14),
-      column.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
-      column.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -18),
-
-      rule.heightAnchor.constraint(equalToConstant: 1),
-      kind.heightAnchor.constraint(equalToConstant: 40),
-    ])
-  }
-
-  private func style(_ field: UITextField, placeholder: String, size: CGFloat) {
-    field.placeholder = placeholder
-    field.font = .systemFont(ofSize: size)
-    field.textColor = MullPalette.ink
-    field.autocorrectionType = .no
-    field.addTarget(self, action: #selector(changed), for: .editingChanged)
-    field.translatesAutoresizingMaskIntoConstraints = false
-  }
-}
-
-private extension UIImage {
-  /// Longest edge capped, aspect kept. Vision reads a 1600px screenshot as
-  /// well as a 3000px one and the extension has a fraction of the app's memory.
-  func mullDownscaled(maxDimension: CGFloat) -> UIImage {
-    let longest = max(size.width, size.height)
-    guard longest > maxDimension else { return self }
-    let scale = maxDimension / longest
-    let target = CGSize(width: size.width * scale, height: size.height * scale)
-    return UIGraphicsImageRenderer(size: target).image { _ in
-      draw(in: CGRect(origin: .zero, size: target))
+    if guess.failed {
+      detailLabel.text = "This one says the payment did not go through."
+    } else if let payee = guess.payee {
+      detailLabel.text = "To \(payee)"
+    } else if guess.hasReference {
+      detailLabel.text = "Payment reference found"
+    } else {
+      detailLabel.text = "Mull will read this when you open it."
     }
+  }
+
+  /// Indian digit grouping: 1,24,600. Matches `inr()` in lib/core/money.dart.
+  private func grouped(_ amount: Int) -> String {
+    let digits = String(amount)
+    guard digits.count > 3 else { return digits }
+    let last3 = String(digits.suffix(3))
+    var rest = String(digits.dropLast(3))
+    var parts: [String] = []
+    while rest.count > 2 {
+      parts.insert(String(rest.suffix(2)), at: 0)
+      rest = String(rest.dropLast(2))
+    }
+    if !rest.isEmpty { parts.insert(rest, at: 0) }
+    return parts.joined(separator: ",") + "," + last3
   }
 }

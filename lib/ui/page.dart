@@ -7,30 +7,34 @@ import '../screens/profile_sheet.dart';
 import 'tokens.dart';
 import 'widgets.dart';
 
-/// Layout constants shared by the shell and pages.
+/// Layout constants shared by every page.
+///
+/// There is no tab bar any more — Mull is one thing, so the groups list is the
+/// app rather than a tab of it, and the call-to-action sits straight above the
+/// home indicator.
 class ShellMetrics {
-  static double tabBarBottom(BuildContext context) => MediaQuery.paddingOf(context).bottom > 0 ? 26 : 14;
-  static const tabBarHeight = 68.0;
-
-  /// Distance from the screen bottom to the pinned call-to-action (112 in the design).
-  static double ctaBottom(BuildContext context) => tabBarBottom(context) + tabBarHeight + 18;
+  /// Distance from the screen bottom to the pinned call-to-action.
+  static double ctaBottom(BuildContext context) =>
+      MediaQuery.paddingOf(context).bottom > 0 ? 28 : 20;
 }
 
-/// Standard tab page: backdrop blobs, persistent brand bar that frosts on scroll,
-/// scrolling content, and a pinned call-to-action above the floating tab bar.
+/// Standard page: backdrop blobs, a brand bar that frosts on scroll, scrolling
+/// content, and a pinned call-to-action at the bottom.
 class MullPage extends StatefulWidget {
   const MullPage({
     super.key,
     required this.blobs,
     required this.children,
     this.bottom,
-    this.showTabBar = true,
+    this.header,
   });
 
   final List<BlobSpec> blobs;
   final List<Widget> children;
   final Widget? bottom;
-  final bool showTabBar;
+
+  /// Replaces the wordmark bar — detail pages put a back button there instead.
+  final Widget? header;
 
   @override
   State<MullPage> createState() => _MullPageState();
@@ -76,7 +80,7 @@ class _MullPageState extends State<MullPage> {
     final store = context.store;
     final top = MediaQuery.paddingOf(context).top;
     final headerTop = top > 0 ? top - 6 : 20.0;
-    final ctaBottom = widget.showTabBar ? ShellMetrics.ctaBottom(context) : MediaQuery.paddingOf(context).bottom + 16;
+    final ctaBottom = ShellMetrics.ctaBottom(context);
 
     return Material(
       type: MaterialType.transparency,
@@ -109,10 +113,11 @@ class _MullPageState extends State<MullPage> {
                 visible: _scrolled,
                 child: Padding(
                   padding: EdgeInsets.fromLTRB(22, headerTop, 22, 0),
-                  child: BrandBar(
-                    initial: store.profile.initial,
-                    onProfile: () => showProfileSheet(context),
-                  ),
+                  child: widget.header ??
+                      BrandBar(
+                        initial: store.profile.initial,
+                        onProfile: () => showProfileSheet(context),
+                      ),
                 ),
               ),
             ),
@@ -137,7 +142,11 @@ class _MullPageState extends State<MullPage> {
                       AnimatedContainer(
                         key: const ValueKey('footerScrim'),
                         duration: const Duration(milliseconds: 240),
-                        height: 28,
+                        // Tall enough to hide a row of body text as it passes
+                        // under the button. With the tab bar gone the solid
+                        // band starts much lower down the screen, so a short
+                        // fade left a half-legible line sliced by the CTA.
+                        height: 44,
                         decoration: BoxDecoration(
                           gradient: LinearGradient(
                             begin: Alignment.topCenter,
@@ -252,7 +261,8 @@ class PageTitle extends StatelessWidget {
   }
 }
 
-/// Back button + right-aligned eyebrow, used on detail pages.
+/// Back button + right-aligned eyebrow. Goes in [MullPage.header], so it
+/// carries no padding of its own.
 class DetailBar extends StatelessWidget {
   const DetailBar({
     super.key,
@@ -267,8 +277,8 @@ class DetailBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(22, 10, 22, 0),
+    return SizedBox(
+      height: 44,
       child: Row(
         children: [
           const BackButtonCircle(),

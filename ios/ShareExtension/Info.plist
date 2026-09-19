@@ -6,24 +6,21 @@
 	<dict>
 		<key>NSExtensionAttributes</key>
 		<dict>
-			<!-- TRUEPREDICATE would put Mull in every share sheet on the phone,
-			     including ones it can do nothing with. Only offer Mull for the
-			     three things the inbox knows how to read. -->
+			<!-- Images only. Mull reads a UPI receipt off a screenshot and
+			     settles the debt it pays off; a shared link or a line of text
+			     has nowhere to go, and appearing in that share sheet only to
+			     do nothing is worse than not appearing. -->
 			<key>NSExtensionActivationRule</key>
 			<dict>
-				<!-- A three-hour browsing session ends with a camera roll full
-				     of screenshots. Selecting twenty of them and sorting the
-				     lot in one pass is the whole point of the share sheet. -->
+				<!-- Several at once: a trip ends with a run of payments to
+				     everybody, and sending the lot in one pass beats eight
+				     trips through the share sheet. -->
 				<key>NSExtensionActivationSupportsImageWithMaxCount</key>
 				<integer>20</integer>
-				<key>NSExtensionActivationSupportsWebURLWithMaxCount</key>
-				<integer>1</integer>
-				<key>NSExtensionActivationSupportsText</key>
-				<true/>
 			</dict>
 		</dict>
-		<!-- No storyboard: the triage UI is built in code so it can size itself
-		     to however many screenshots arrived. -->
+		<!-- No storyboard: the confirmation list is built in code so it can
+		     size itself to however many screenshots arrived. -->
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
 		<key>NSExtensionPointIdentifier</key>

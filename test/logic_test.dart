@@ -1,10 +1,7 @@
-import 'dart:convert';
-
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mull/core/cycle.dart';
-import 'package:mull/core/link_reader.dart';
+import 'package:mull/core/dates.dart';
 import 'package:mull/core/money.dart';
-import 'package:mull/core/screenshot_reader.dart';
+import 'package:mull/core/ocr.dart';
 import 'package:mull/core/split.dart';
 import 'package:mull/core/upi.dart';
 import 'package:mull/core/upi_receipt.dart';
@@ -41,181 +38,35 @@ void main() {
     });
   });
 
-  group('Cycle', () {
-    test('month starting on the 1st', () {
-      final c = Cycle.of(DateTime(2026, 9, 19), 1);
-      expect(c.start, DateTime(2026, 9, 1));
-      expect(c.end, DateTime(2026, 10, 1));
-      expect(c.daysLeft(DateTime(2026, 9, 19, 15)), 12);
-      expect(c.label, 'September');
+  group('dates', () {
+    test('adding months keeps the day where the month is long enough', () {
+      expect(addMonths(DateTime(2026, 1, 15), 1), DateTime(2026, 2, 15));
+      // Rent set on the 31st is still rent in February — the day clamps rather
+      // than rolling into March, which would walk the date forward every short
+      // month until it fell off the calendar.
+      expect(addMonths(DateTime(2026, 1, 31), 1), DateTime(2026, 2, 28));
+      expect(addMonths(DateTime(2028, 1, 31), 1), DateTime(2028, 2, 29), reason: 'leap year');
+      expect(addMonths(DateTime(2026, 12, 5), 1), DateTime(2027, 1, 5));
+      expect(addMonths(DateTime(2026, 11, 30), 3), DateTime(2027, 2, 28));
+      expect(addMonths(DateTime(2026, 3, 10), 12), DateTime(2027, 3, 10));
     });
 
-    test('payday cycle straddles months and years', () {
-      final c = Cycle.of(DateTime(2027, 1, 3), 25);
-      expect(c.start, DateTime(2026, 12, 25));
-      expect(c.end, DateTime(2027, 1, 25));
-      expect(c.label, 'January');
-    });
-  });
-
-  group('store', () {
-    MullStore make() {
-      final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19, 10);
-      s.completeOnboarding(name: 'Ananya', budget: 40000);
-      return s;
-    }
-
-    test('sample data reproduces the mockup numbers', () {
-      final s = make()..loadSample();
-      expect(s.spent, 6200);
-      expect(s.needsTotal, 9200);
-      expect(s.room, 33800);
-      expect(s.leftForWants, 24600);
-      final wants = s.reach(ItemKind.want);
-      expect(wants.inReach.map((i) => i.name), ['Mechanical keyboard', 'Filter coffee kit', 'Linen shirt']);
-      expect(wants.outOfReach.first.$1.name, 'Headphones');
-      expect(wants.outOfReach.first.$2, 18150 + 24990 - 24600);
-      expect(s.pendingInReach.single.name, 'Mechanical keyboard');
+    test('a clamped day does not stay clamped', () {
+      // 31 Jan → 28 Feb is right, but stepping again from there must not give
+      // 28 March: each occurrence is measured from the schedule's own date.
+      var d = DateTime(2026, 1, 31);
+      expect(addMonths(d, 1), DateTime(2026, 2, 28));
+      expect(addMonths(d, 2), DateTime(2026, 3, 31));
     });
 
-    test('needs are reserved before wants', () {
-      final s = make();
-      s.addItem(name: 'Rent top-up', price: 30000, kind: ItemKind.need);
-      final want = s.addItem(name: 'Shoes', price: 12000, kind: ItemKind.want);
-      expect(s.leftForWants, 10000);
-      expect(s.reach(ItemKind.want).outOfReach.single.$1.id, want.id);
-      expect(want.outOfReachSince, isNotNull);
-    });
-
-    test('adding to the wishlist never moves the ruler', () {
-      final s = make();
-      expect(s.room, 40000);
-      s.addItem(name: 'Desk', price: 37800, kind: ItemKind.want);
-      s.addItem(name: 'Headphones', price: 24990, kind: ItemKind.want);
-      // Wanting things costs nothing — only buying does.
-      expect(s.room, 40000);
-      expect(s.spent, 0);
-    });
-
-    test('needs cannot reserve money that is not there', () {
-      final s = make();
-      s.addItem(name: 'Laptop', price: 60000, kind: ItemKind.need);
-      expect(s.leftForWants, -20000, reason: 'the shortfall is real and worth saying out loud');
-      expect(s.needsReserved, 40000, reason: 'but only the budget can actually be set aside');
-      expect(s.reach(ItemKind.want).pool, -20000);
-    });
-
-    test('time to reach counts the queue ahead, not just the price', () {
-      final s = make();
-      s.addItem(name: 'Charger', price: 10000, kind: ItemKind.need);
-      // 30,000 a month for wants once the need is set aside.
-      final first = s.addItem(name: 'Keyboard', price: 12900, kind: ItemKind.want);
-      final second = s.addItem(name: 'Desk', price: 37800, kind: ItemKind.want);
-      expect(s.monthlyWantRoom, 30000);
-      expect(s.monthsToReach(first), 1);
-      // 12,900 + 37,800 = 50,700 → two months at 30,000.
-      expect(s.monthsToReach(second), 2);
-      expect(s.reachDate(second), DateTime(2026, 11, 1));
-    });
-
-    test('no month estimate when needs already outgrow the budget', () {
-      final s = make();
-      s.addItem(name: 'Laptop', price: 60000, kind: ItemKind.need);
-      final want = s.addItem(name: 'Desk', price: 37800, kind: ItemKind.want);
-      expect(s.monthsToReach(want), isNull);
-      expect(s.reachDate(want), isNull);
-    });
-
-    test('buying within the line pushes nothing else out', () {
-      // Two wants being in reach together already means the budget covers
-      // both, so buying one can never cost the other its place. Spending what
-      // you planned to spend is not an event.
-      final s = make();
-      final desk = s.addItem(name: 'Desk', price: 30000, kind: ItemKind.want);
-      final kit = s.addItem(name: 'Coffee kit', price: 9000, kind: ItemKind.want);
-      expect(s.reach(ItemKind.want).inReach.map((i) => i.name), ['Desk', 'Coffee kit']);
-      expect(s.overBudgetBy(desk), 0);
-      s.buyItem(desk);
-      expect(s.reach(ItemKind.want).inReach.single.id, kit.id);
-    });
-
-    test('buying past the line is the only thing worth a warning', () {
-      final s = make();
-      final desk = s.addItem(name: 'Desk', price: 52000, kind: ItemKind.want);
-      expect(s.overBudgetBy(desk), 12000);
-      s.logSpend('Groceries', 5000);
-      expect(s.overBudgetBy(desk), 17000, reason: 'the line moves as the month is spent');
-    });
-
-    test('buying a need leaves the wants pool exactly where it was', () {
-      final s = make();
-      final need = s.addItem(name: 'Charger', price: 10000, kind: ItemKind.need);
-      s.addItem(name: 'Desk', price: 30000, kind: ItemKind.want);
-      final before = s.leftForWants;
-      s.buyItem(need);
-      expect(s.leftForWants, before, reason: 'realising a reservation changes no one else’s place');
-    });
-
-    test('short stints below the line do not trigger an in-reach moment', () {
-      final s = make();
-      final want = s.addItem(name: 'Desk', price: 50000, kind: ItemKind.want);
-      expect(want.outOfReachSince, isNotNull);
-      s.setBudget(60000);
-      expect(s.pendingInReach, isEmpty);
-      expect(want.outOfReachSince, isNull);
-    });
-
-    test('a long wait crossing the line is celebrated once', () {
-      var now = DateTime(2026, 9, 1);
-      final s = MullStore.memory()..clock = () => now;
-      s.completeOnboarding(name: 'A', budget: 10000);
-      final want = s.addItem(name: 'Keyboard', price: 12900, kind: ItemKind.want);
-      now = DateTime(2026, 10, 2);
-      s.setBudget(20000);
-      expect(s.pendingInReach.single.id, want.id);
-      s.keepWaiting(want);
-      expect(s.pendingInReach, isEmpty);
-    });
-
-    test('buying moves money from wishlist to spent, and undo restores it', () {
-      final s = make();
-      final item = s.addItem(name: 'Charger', price: 2400, kind: ItemKind.need);
-      final spend = s.buyItem(item);
-      expect(s.items, isEmpty);
-      expect(s.spent, 2400);
-      s.removeSpend(spend);
-      expect(s.items.single.name, 'Charger');
-      expect(s.spent, 0);
-    });
-
-    test('needs are re-checked each new cycle', () {
-      var now = DateTime(2026, 9, 10);
-      final s = MullStore.memory()..clock = () => now;
-      s.completeOnboarding(name: 'A', budget: 10000);
-      final need = s.addItem(name: 'Charger', price: 2400, kind: ItemKind.need);
-      expect(s.needsToRecheck, [need]);
-      s.confirmNeed(need);
-      expect(s.needsToRecheck, isEmpty);
-      now = DateTime(2026, 10, 2);
-      expect(s.needsToRecheck, [need]);
-    });
-
-    test('budget override applies to one cycle only', () {
-      var now = DateTime(2026, 9, 10);
-      final s = MullStore.memory()..clock = () => now;
-      s.completeOnboarding(name: 'A', budget: 10000);
-      s.setBudget(15000, justThisCycle: true);
-      expect(s.budget, 15000);
-      now = DateTime(2026, 10, 2);
-      expect(s.budget, 10000);
-    });
-
-    test('JSON round trip', () {
-      final s = make()..loadSample();
-      final json = jsonDecode(jsonEncode(s.toJson())) as Map<String, dynamic>;
-      expect(json['items'], hasLength(7));
-      expect(Group.fromJson((json['groups'] as List).first as Map<String, dynamic>).total, 47400);
-      expect(NamedList.fromJson((json['lists'] as List).first as Map<String, dynamic>).reachBreak, 6);
+    test('relative days read the way people say them', () {
+      final now = DateTime(2026, 9, 19, 14);
+      expect(relativeDay(DateTime(2026, 9, 19), now), 'today');
+      expect(relativeDay(DateTime(2026, 9, 20), now), 'tomorrow');
+      expect(relativeDay(DateTime(2026, 9, 18), now), 'yesterday');
+      expect(relativeDay(DateTime(2026, 9, 23), now), 'in 4 days');
+      expect(relativeDay(DateTime(2026, 9, 12), now), '7 days ago');
+      expect(relativeDay(DateTime(2026, 10, 30), now), 'on 30 Oct');
     });
   });
 
@@ -267,7 +118,6 @@ void main() {
       expect(simplify(const {}), isEmpty);
     });
   });
-
   group('group ledger', () {
     Group make3() => Group(
       name: 'Goa',
@@ -369,11 +219,10 @@ void main() {
       expect(Member(name: 'Divya').initials, 'DI');
     });
   });
-
   group('store groups', () {
     MullStore withGroup() {
       final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19, 10);
-      s.completeOnboarding(name: 'Ananya', budget: 40000);
+      s.completeOnboarding(name: 'Ananya');
       s.addGroup('Goa', ['Sahil', 'Divya']);
       return s;
     }
@@ -486,33 +335,6 @@ void main() {
       expect(s.confirmationsForYou.single.$2.amount, 200);
     });
 
-    test('a repeating expense is offered once its month comes round', () {
-      var now = DateTime(2026, 9, 19);
-      final s = MullStore.memory()..clock = () => now;
-      s.completeOnboarding(name: 'Ananya', budget: 40000);
-      s.addGroup('Flat', ['Ritu']);
-      final g = s.groups.single;
-      final rent = s.addExpense(
-        g,
-        description: 'Rent',
-        amount: 75000,
-        payerId: g.you!.id,
-        shares: splitEqually(75000, g.members.map((m) => m.id).toList()),
-        repeatsMonthly: true,
-        date: DateTime(2026, 9, 1),
-      );
-      expect(s.dueRepeats(g), isEmpty, reason: 'on 19 September, next month has not come round yet');
-
-      now = DateTime(2026, 10, 3);
-      expect(s.dueRepeats(g), [rent]);
-
-      final next = s.repeatExpense(g, rent);
-      expect(next.date, DateTime(2026, 10, 1));
-      expect(next.amount, 75000);
-      expect(next.repeatsMonthly, isTrue);
-      expect(s.dueRepeats(g), isEmpty, reason: 'already carried forward');
-    });
-
     test('activity is newest first, expenses and settlements together', () {
       final s = withGroup();
       final g = s.groups.single;
@@ -540,7 +362,486 @@ void main() {
         payerId: g.you!.id,
         shares: splitEqually(3000, g.members.map((m) => m.id).toList()),
       );
-      expect(s.groupsNet, 2000);
+      expect(s.netAcrossAll, 2000);
+    });
+  });
+
+  group('sample data', () {
+    test('reproduces the numbers on the mockup', () {
+      // The cascade has to stop at the closure, or `..loadSample()` binds to
+      // the DateTime inside it rather than to the store.
+      final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19, 10);
+      s.loadSample();
+
+      // "You owe, all in / ₹3,850"
+      expect(s.netAcrossAll, -3850);
+      expect(s.isAllSquare, isFalse);
+
+      expect(s.namedGroups.map((g) => g.title), ['Flat', 'Goa trip', 'Sunday football']);
+      expect(s.groupById(s.namedGroups[0].id)!.yourBalance, -6250, reason: 'Flat · you owe ₹6,250');
+      expect(s.namedGroups[1].yourBalance, 2400, reason: 'Goa trip · you get back ₹2,400');
+      expect(s.namedGroups[2].yourBalance, 0, reason: 'Sunday football · settled up');
+
+      // "Sahil says he sent you ₹2,400" — a claim, so it moves nothing yet.
+      expect(s.confirmationsForYou, hasLength(1));
+      final (group, claim) = s.confirmationsForYou.single;
+      expect(group.title, 'Goa trip');
+      expect(claim.amount, 2400);
+      expect(claim.status, SettlementStatus.pending);
+
+      // And it is exactly the payment the ledger says he owes you.
+      final owed = simplify(group.balances).firstWhere((t) => t.to == group.you!.id);
+      expect(owed.amount, 2400);
+      expect(owed.from, claim.fromId);
+
+      // Every ledger balances to zero, or money has gone missing.
+      for (final g in s.groups) {
+        expect(g.balances.values.fold(0, (a, b) => a + b), 0, reason: g.title);
+      }
+
+      // Rent is due today; wifi is not yet.
+      expect(s.dueRecurring.map((d) => d.$2.description), ['Rent']);
+      expect(s.upcomingRecurring.map((d) => d.$2.description), ['Wifi']);
+      expect(s.runAutoRecurring(), isEmpty, reason: 'nothing adds itself without being told to');
+    });
+  });
+
+  group('recurring', () {
+    ({MullStore store, Group group, Recurring rent}) flat({DateTime? clockAt}) {
+      var now = clockAt ?? DateTime(2026, 9, 19, 10);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Flat', ['Ritu']);
+      final g = s.groups.single;
+      final rent = s.addRecurring(
+        g,
+        description: 'Rent',
+        amount: 75000,
+        payerId: g.you!.id,
+        shares: splitEqually(75000, g.members.map((m) => m.id).toList()),
+        startsOn: DateTime(2026, 10, 1),
+      );
+      return (store: s, group: g, rent: rent);
+    }
+
+    test('nothing is due before its date', () {
+      // The clock is 19 September and the rent starts on 1 October: close
+      // enough to be worth seeing, not close enough to owe.
+      final f = flat();
+      expect(f.store.dueRecurring, isEmpty);
+      expect(f.store.upcomingRecurring, hasLength(1));
+      expect(f.group.expenses, isEmpty, reason: 'nothing is created until it is confirmed');
+    });
+
+    test('it shows up in the next fortnight, then comes due', () {
+      var now = DateTime(2026, 9, 19);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Flat', ['Ritu']);
+      final g = s.groups.single;
+      s.addRecurring(
+        g,
+        description: 'Rent',
+        amount: 75000,
+        payerId: g.you!.id,
+        shares: splitEqually(75000, g.members.map((m) => m.id).toList()),
+        startsOn: DateTime(2026, 9, 25),
+      );
+      expect(s.upcomingRecurring, hasLength(1));
+      expect(s.dueRecurring, isEmpty);
+
+      now = DateTime(2026, 9, 25, 9);
+      expect(s.dueRecurring, hasLength(1));
+      expect(s.upcomingRecurring, isEmpty);
+    });
+
+    test('adding a due one records the expense and moves the schedule on', () {
+      var now = DateTime(2026, 10, 2);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Flat', ['Ritu']);
+      final g = s.groups.single;
+      final rent = s.addRecurring(
+        g,
+        description: 'Rent',
+        amount: 75000,
+        payerId: g.you!.id,
+        shares: splitEqually(75000, g.members.map((m) => m.id).toList()),
+        startsOn: DateTime(2026, 10, 1),
+      );
+
+      final expense = s.addDue(g, rent);
+      expect(expense.date, DateTime(2026, 10, 1), reason: 'dated when it was owed, not when it was confirmed');
+      expect(expense.recurringId, rent.id);
+      expect(expense.isRecurring, isTrue);
+      expect(rent.nextDue, DateTime(2026, 11, 1));
+      expect(rent.lastAddedOn, DateTime(2026, 10, 1));
+      expect(s.dueRecurring, isEmpty);
+      expect(g.yourBalance, 37500, reason: 'you paid 75,000 and your share is half');
+    });
+
+    test('a confirmed change becomes the new normal', () {
+      // The landlord put the rent up. Confirming the higher number this month
+      // must not leave next month asking for the old one.
+      final f = flat(clockAt: DateTime(2026, 10, 2));
+      final g = f.group;
+      final newShares = splitEqually(80000, g.members.map((m) => m.id).toList());
+      final expense = f.store.addDue(g, f.rent, amount: 80000, shares: newShares);
+      expect(expense.amount, 80000);
+      expect(f.rent.amount, 80000);
+      expect(f.rent.shares, newShares);
+    });
+
+    test('skipping records nothing and still moves on', () {
+      final f = flat(clockAt: DateTime(2026, 10, 2));
+      f.store.skipDue(f.group, f.rent);
+      expect(f.group.expenses, isEmpty);
+      expect(f.rent.nextDue, DateTime(2026, 11, 1));
+    });
+
+    test('a phone that was off for months owes one period, not five', () {
+      // Catching up silently is how a scheduler turns a holiday into a
+      // five-figure surprise.
+      var now = DateTime(2026, 10, 2);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Flat', ['Ritu']);
+      final g = s.groups.single;
+      final rent = s.addRecurring(
+        g,
+        description: 'Rent',
+        amount: 75000,
+        payerId: g.you!.id,
+        shares: splitEqually(75000, g.members.map((m) => m.id).toList()),
+        startsOn: DateTime(2026, 10, 1),
+      );
+
+      now = DateTime(2027, 3, 4);
+      expect(s.dueRecurring, hasLength(1), reason: 'due once, now');
+      s.addDue(g, rent);
+      expect(g.expenses, hasLength(1));
+      expect(rent.nextDue, DateTime(2027, 4, 1));
+      expect(s.dueRecurring, isEmpty);
+    });
+
+    test('a paused schedule is not due, and does not pile up while it is off', () {
+      var now = DateTime(2026, 10, 2);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Flat', ['Ritu']);
+      final g = s.groups.single;
+      final rent = s.addRecurring(
+        g,
+        description: 'Rent',
+        amount: 75000,
+        payerId: g.you!.id,
+        shares: splitEqually(75000, g.members.map((m) => m.id).toList()),
+        startsOn: DateTime(2026, 10, 1),
+      );
+
+      s.setRecurringPaused(g, rent, true);
+      expect(s.dueRecurring, isEmpty);
+
+      now = DateTime(2027, 1, 9);
+      s.setRecurringPaused(g, rent, false);
+      expect(rent.nextDue, DateTime(2027, 1, 9), reason: 'nothing is owed for the time it was off');
+      expect(s.dueRecurring, hasLength(1));
+    });
+
+    test('a schedule stops at its end date', () {
+      var now = DateTime(2026, 10, 2);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Flat', ['Ritu']);
+      final g = s.groups.single;
+      final rent = s.addRecurring(
+        g,
+        description: 'Rent',
+        amount: 75000,
+        payerId: g.you!.id,
+        shares: splitEqually(75000, g.members.map((m) => m.id).toList()),
+        startsOn: DateTime(2026, 10, 1),
+        endsOn: DateTime(2026, 11, 15),
+      );
+
+      s.addDue(g, rent);
+      expect(rent.nextDue, DateTime(2026, 11, 1));
+      expect(rent.hasEnded, isFalse);
+
+      now = DateTime(2026, 11, 2);
+      s.addDue(g, rent);
+      expect(rent.nextDue, DateTime(2026, 12, 1));
+      expect(rent.hasEnded, isTrue);
+      expect(rent.isActive, isFalse);
+
+      now = DateTime(2026, 12, 2);
+      expect(s.dueRecurring, isEmpty, reason: 'the lease is over');
+    });
+
+    test('only autoAdd schedules add themselves, and they report what they did', () {
+      var now = DateTime(2026, 10, 2);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Flat', ['Ritu']);
+      final g = s.groups.single;
+      final ids = g.members.map((m) => m.id).toList();
+      s.addRecurring(
+        g,
+        description: 'Rent',
+        amount: 75000,
+        payerId: g.you!.id,
+        shares: splitEqually(75000, ids),
+        startsOn: DateTime(2026, 10, 1),
+      );
+      s.addRecurring(
+        g,
+        description: 'Wifi',
+        amount: 1200,
+        payerId: g.you!.id,
+        shares: splitEqually(1200, ids),
+        startsOn: DateTime(2026, 10, 1),
+        autoAdd: true,
+      );
+
+      final made = s.runAutoRecurring();
+      expect(made, hasLength(1));
+      expect(made.single.$2.description, 'Wifi');
+      expect(g.expenses.map((e) => e.description), ['Wifi']);
+      expect(s.dueRecurring, hasLength(1), reason: 'rent still waits to be confirmed');
+      expect(s.runAutoRecurring(), isEmpty, reason: 'and it does not add it twice');
+    });
+
+    test('every frequency lands where it should', () {
+      final from = DateTime(2026, 9, 19);
+      expect(Frequency.weekly.next(from), DateTime(2026, 9, 26));
+      expect(Frequency.fortnightly.next(from), DateTime(2026, 10, 3));
+      expect(Frequency.monthly.next(from), DateTime(2026, 10, 19));
+      expect(Frequency.quarterly.next(from), DateTime(2026, 12, 19));
+      expect(Frequency.yearly.next(from), DateTime(2027, 9, 19));
+    });
+
+    test('stopping a schedule keeps the expenses it already made', () {
+      final f = flat(clockAt: DateTime(2026, 10, 2));
+      final expense = f.store.addDue(f.group, f.rent);
+      f.store.removeRecurring(f.group, f.rent);
+      expect(f.group.recurring, isEmpty);
+      expect(f.group.expenses, hasLength(1), reason: 'that was real money');
+      expect(expense.recurringId, isNull);
+      expect(f.group.yourBalance, 37500, reason: 'and the balance does not move');
+    });
+
+    test('someone a schedule depends on cannot be removed', () {
+      final f = flat();
+      final ritu = f.group.members.firstWhere((m) => m.name == 'Ritu');
+      expect(f.store.canRemoveMember(f.group, ritu), isFalse, reason: 'she is in the rent split');
+    });
+  });
+
+  group('one-to-one ledgers', () {
+    MullStore make() {
+      final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19);
+      s.completeOnboarding(name: 'Ananya');
+      return s;
+    }
+
+    test('a direct ledger is two seats and is titled after the person', () {
+      final s = make();
+      final d = s.directWith(name: 'Ritu Nair', upiId: 'ritu@okicici');
+      expect(d.isDirect, isTrue);
+      expect(d.members, hasLength(2));
+      expect(d.title, 'Ritu Nair', reason: 'the person is the name, not "Me and Ritu"');
+      expect(d.counterpart?.upiId, 'ritu@okicici');
+      expect(s.directLedgers, [d]);
+      expect(s.namedGroups, isEmpty);
+    });
+
+    test('asking twice for the same person returns the same ledger', () {
+      final s = make();
+      final first = s.directWith(name: 'Ritu', userId: 'u-ritu');
+      final again = s.directWith(name: 'Ritu Nair', userId: 'u-ritu');
+      expect(again.id, first.id, reason: 'matched on the account, not the spelling');
+      expect(s.directWith(name: 'ritu').id, first.id, reason: 'and on the name when there is no account');
+      expect(s.groups, hasLength(1));
+    });
+
+    test('it settles like any other ledger and counts in the total', () {
+      final s = make();
+      final d = s.directWith(name: 'Ritu');
+      final me = d.you!.id;
+      final ritu = d.counterpart!.id;
+      s.addExpense(
+        d,
+        description: 'Cab',
+        amount: 900,
+        payerId: ritu,
+        shares: splitEqually(900, [me, ritu]),
+      );
+      expect(d.yourBalance, -450);
+      expect(s.netAcrossAll, -450);
+      expect(s.totalYouOwe, 450);
+      expect(s.totalOwedToYou, 0);
+    });
+
+    test('groups and people are listed apart', () {
+      final s = make();
+      s.addGroup('Goa', ['Sahil']);
+      s.directWith(name: 'Ritu');
+      expect(s.namedGroups.map((g) => g.title), ['Goa']);
+      expect(s.directLedgers.map((g) => g.title), ['Ritu']);
+    });
+  });
+
+  group('reminders', () {
+    MullStore owed() {
+      final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19, 10);
+      s.completeOnboarding(name: 'Ananya');
+      s.updateProfile((p) => p.upiId = 'ananya@okhdfc');
+      return s;
+    }
+
+    void youPaidFor(MullStore s, Group g, int amount) {
+      s.addExpense(
+        g,
+        description: 'Dinner',
+        amount: amount,
+        payerId: g.you!.id,
+        shares: splitEqually(amount, g.members.map((m) => m.id).toList()),
+      );
+    }
+
+    test('one person owing across two ledgers is one row, netted', () {
+      final s = owed();
+      s.addGroup('Goa', ['Sahil']);
+      s.addGroup('Flat', ['Sahil']);
+      for (final g in s.groups) {
+        youPaidFor(s, g, 1000);
+      }
+      final owing = s.owedToYou;
+      expect(owing, hasLength(1), reason: 'chasing the same friend twice is how this feature gets uninstalled');
+      expect(owing.single.amount, 1000, reason: '500 from each');
+      expect(owing.single.groups, hasLength(2));
+    });
+
+    test('the message names the amount and how to pay', () {
+      final s = owed();
+      s.addGroup('Goa', ['Sahil']);
+      youPaidFor(s, s.groups.single, 1000);
+      final message = s.nudgeMessage(s.owedToYou.single);
+      expect(message, contains('Sahil'));
+      expect(message, contains('₹500'));
+      expect(message, contains('Goa'));
+      expect(message, contains('ananya@okhdfc'));
+    });
+
+    test('nobody is nudged twice in a day', () {
+      var now = DateTime(2026, 9, 19, 10);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Goa', ['Sahil']);
+      youPaidFor(s, s.groups.single, 1000);
+
+      final first = s.owedToYou.single;
+      expect(s.canNudge(first), isTrue);
+      s.markNudged(first);
+      expect(s.canNudge(s.owedToYou.single), isFalse);
+
+      now = DateTime(2026, 9, 20, 11);
+      expect(s.canNudge(s.owedToYou.single), isTrue, reason: 'a day later is fair');
+    });
+
+    test('people you owe are not on the list', () {
+      final s = owed();
+      final g = s.addGroup('Goa', ['Sahil']);
+      final sahil = g.members.firstWhere((m) => m.name == 'Sahil');
+      s.addExpense(
+        g,
+        description: 'Hotel',
+        amount: 4000,
+        payerId: sahil.id,
+        shares: splitEqually(4000, g.members.map((m) => m.id).toList()),
+      );
+      expect(s.owedToYou, isEmpty);
+    });
+  });
+
+  group('reading a file written by the wishlist-era app', () {
+    test('groups carry over and repeatsMonthly becomes a schedule', () {
+      final saved = {
+        'version': 1,
+        'profile': {'name': 'Ananya', 'monthlyBudget': 40000, 'resetDay': 1, 'theme': 'system', 'onboarded': true},
+        'items': [
+          {'id': 'i1', 'name': 'Jacket', 'price': 8000, 'kind': 'want', 'createdAt': '2026-09-01T00:00:00.000'},
+        ],
+        'lists': [],
+        'spends': [],
+        'budgetOverrides': {'2026-09': 30000},
+        'groups': [
+          {
+            'id': 'g1',
+            'name': 'Flat',
+            'createdAt': '2026-08-01T00:00:00.000',
+            'members': [
+              {'id': 'm1', 'name': 'Ananya', 'isYou': true},
+              {'id': 'm2', 'name': 'Ritu'},
+            ],
+            'expenses': [
+              {
+                'id': 'e1',
+                'description': 'Rent',
+                'amount': 60000,
+                'payerId': 'm1',
+                'shares': {'m1': 30000, 'm2': 30000},
+                'method': 'equal',
+                'repeatsMonthly': true,
+                'date': '2026-09-01T00:00:00.000',
+              },
+              {
+                'id': 'e2',
+                'description': 'Chai',
+                'amount': 100,
+                'payerId': 'm2',
+                'shares': {'m1': 50, 'm2': 50},
+                'method': 'equal',
+                'repeatsMonthly': false,
+                'date': '2026-09-04T00:00:00.000',
+              },
+            ],
+            'settlements': [],
+          },
+        ],
+      };
+
+      final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19);
+      s.debugRestore(saved);
+
+      expect(s.profile.name, 'Ananya');
+      expect(s.groups, hasLength(1));
+      final g = s.groups.single;
+      expect(g.expenses, hasLength(2), reason: 'the ledger is untouched');
+      expect(g.yourBalance, 29950);
+
+      // The flag said "this happens again" and nothing more. It becomes the
+      // schedule it was always trying to be.
+      expect(g.recurring, hasLength(1));
+      final rent = g.recurring.single;
+      expect(rent.description, 'Rent');
+      expect(rent.amount, 60000);
+      expect(rent.frequency, Frequency.monthly);
+      expect(rent.nextDue, DateTime(2026, 10, 1));
+      expect(g.expenses.firstWhere((e) => e.id == 'e1').recurringId, rent.id);
+      expect(g.expenses.firstWhere((e) => e.id == 'e2').recurringId, isNull);
+
+      // Wishlist, spends and lists are simply not read — there is nowhere for
+      // them to go, and the groups are the part that was ever shared.
+      expect(s.toJson().containsKey('items'), isFalse);
+      expect(s.toJson()['version'], 2);
+    });
+
+    test('a file with no groups in it still opens', () {
+      final s = MullStore.memory();
+      s.debugRestore({'version': 1, 'profile': {'name': 'Ananya', 'onboarded': true}});
+      expect(s.groups, isEmpty);
+      expect(s.profile.name, 'Ananya');
     });
   });
 
@@ -619,11 +920,10 @@ void main() {
       expect(UpiReceiptReader.parse([at('SATIN EFFECT SHIRT', .5, .02)]).isEmpty, isTrue);
     });
   });
-
   group('matching a receipt to a debt', () {
     MullStore owing() {
       final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19);
-      s.completeOnboarding(name: 'Ananya', budget: 40000);
+      s.completeOnboarding(name: 'Ananya');
       s.addGroup('Goa', ['Sahil']);
       final g = s.groups.single;
       final sahil = g.members.firstWhere((m) => m.name == 'Sahil')..upiId = 'sahil@okaxis';
@@ -642,7 +942,7 @@ void main() {
       final s = owing();
       final match = s.matchReceipt(const UpiReceipt(amount: 1000, payeeUpiId: 'sahil@okaxis', utr: '4471'));
       expect(match, isNotNull);
-      expect(match!.$1.name, 'Goa');
+      expect(match!.$1.title, 'Goa');
       expect(match.$2.amount, 1000);
     });
 
@@ -675,7 +975,6 @@ void main() {
       expect(s.matchReceipt(const UpiReceipt(amount: 3000, payeeUpiId: 'sahil@okaxis')), isNull);
     });
   });
-
   group('UPI', () {
     test('accepts the handles Indian banks actually issue', () {
       for (final id in ['ananya@okhdfc', 'sahil.mehta@okaxis', 'kabir-v@ybl', '9876543210@paytm']) {
@@ -702,139 +1001,6 @@ void main() {
     test('leaves the note out rather than sending an empty one', () {
       final uri = upiPaymentUri(upiId: 'a@b', name: 'A', amount: 10, note: '   ');
       expect(uri.queryParameters.containsKey('tn'), isFalse);
-    });
-  });
-
-  group('LinkReader', () {
-    test('tidies store titles', () {
-      expect(
-        LinkReader.tidyTitle('Anker 65W USB-C Charger, Nano II GaN : Amazon.in: Electronics'),
-        'Anker 65W USB-C Charger',
-      );
-      expect(
-        LinkReader.tidyTitle('Buy Keychron K2 Wireless Mechanical Keyboard Online at Best Price'),
-        'Keychron K2 Wireless Mechanical Keyboard',
-      );
-      expect(LinkReader.tidyTitle('Linen Shirt | Nicobar'), 'Linen Shirt');
-    });
-
-    test('extracts urls from share text', () {
-      expect(LinkReader.extractUrl('Check this out https://amzn.in/d/abc123 via app'), 'https://amzn.in/d/abc123');
-      expect(LinkReader.domainOf('https://www.decathlon.in/p/123'), 'decathlon.in');
-    });
-  });
-
-  group('ScreenshotReader', () {
-    OcrLine at(String text, double y, double h) => OcrLine(text, y: y, h: h);
-
-    test('reads a Zara product page — the kind we cannot scrape', () {
-      final read = ScreenshotReader.parse([
-        at('9:41', .012, .013),
-        at('zara.com', .048, .014),
-        at('ZARA', .09, .022),
-        at('SATIN EFFECT SHIRT', .615, .021),
-        at('₹ 3,950', .655, .019),
-        at('MRP incl. of all taxes', .685, .011),
-        at('ADD TO BASKET', .905, .018),
-      ]);
-      expect(read.name, 'SATIN EFFECT SHIRT');
-      expect(read.price, 3950);
-      expect(read.domain, 'zara.com');
-      expect(read.isEmpty, isFalse);
-    });
-
-    test('takes the selling price over the struck-out MRP', () {
-      final read = ScreenshotReader.parse([
-        at('amazon.in', .04, .012),
-        at('Anker 65W USB-C Charger, Nano III', .50, .020),
-        at('4.5 out of 5 stars  1,203 ratings', .55, .012),
-        at('₹2,999', .60, .026),
-        at('M.R.P.: ₹4,999', .64, .014),
-        at('Save ₹2,000 (40%)', .67, .013),
-        at('FREE delivery Thursday, 18 September', .72, .013),
-        at('Add to Cart', .82, .018),
-      ]);
-      expect(read.name, 'Anker 65W USB-C Charger');
-      expect(read.price, 2999);
-      expect(read.domain, 'amazon.in');
-    });
-
-    test('picks the lower price when both are set in the same size', () {
-      for (final order in [
-        ['₹ 2,290', '₹ 4,590'],
-        ['₹ 4,590', '₹ 2,290'],
-      ]) {
-        final read = ScreenshotReader.parse([
-          at('SILK BLEND DRESS', .50, .022),
-          at(order[0], .56, .020),
-          at(order[1], .56, .020),
-        ]);
-        expect(read.price, 2290, reason: order.join(' then '));
-      }
-    });
-
-    test('is not fooled by ratings, discounts or the clock', () {
-      final read = ScreenshotReader.parse([
-        at('9:41', .012, .013),
-        at('100%', .012, .013),
-        at('4.3 ★ 2,145 ratings', .40, .030),
-        at('40% off', .45, .030),
-        at('Cotton Oversized Tee', .52, .020),
-        at('₹1,299', .57, .022),
-      ]);
-      expect(read.price, 1299);
-      expect(read.name, 'Cotton Oversized Tee');
-    });
-
-    test('reads a Massimo Dutti page: fibre percentages are names, not badges', () {
-      // The real failure this came from: "%" was blanket junk, so the actual
-      // name was discarded and "VIEW LOOK" won by being the only line left.
-      final read = ScreenshotReader.parse([
-        at('7:07', .012, .013),
-        at('Massimo Dutti', .128, .020),
-        at('VIEW LOOK', .742, .012),
-        at('100% WOOL REGULAR FIT CHECK SHIRT', .770, .014),
-        at('13,900.00INR', .803, .015),
-        at('MRP incl. of all taxes', .833, .012),
-        at('ADD TO BASKET', .884, .014),
-        at('massimodutti.com', .962, .014),
-      ]);
-      expect(read.name, '100% WOOL REGULAR FIT CHECK SHIRT');
-      expect(read.price, 13900);
-      // Safari's address bar sits at the bottom by default since iOS 15.
-      expect(read.domain, 'massimodutti.com');
-    });
-
-    test('ignores a domain in the middle of the page', () {
-      // A footer link or a watermark is not the store you are shopping at.
-      final read = ScreenshotReader.parse([
-        at('LINEN SHIRT', .40, .022),
-        at('₹2,490', .46, .020),
-        at('also available at brandstore.com', .60, .012),
-      ]);
-      expect(read.domain, isNull);
-    });
-
-    test('reads a price with the currency trailing the number', () {
-      final read = ScreenshotReader.parse([
-        at('LINEN BLEND SHIRT', .50, .022),
-        at('4,990.00INR', .56, .020),
-      ]);
-      expect(read.price, 4990);
-    });
-
-    test('a fibre percentage is never mistaken for the price', () {
-      final read = ScreenshotReader.parse([
-        at('100% COTTON SHIRT', .50, .030),
-        at('₹1,499', .56, .020),
-      ]);
-      expect(read.price, 1499, reason: 'the 100 in "100% COTTON" is not a price');
-      expect(read.name, '100% COTTON SHIRT');
-    });
-
-    test('admits when there is nothing to read', () {
-      expect(ScreenshotReader.parse(const []).isEmpty, isTrue);
-      expect(ScreenshotReader.parse([at('Wi-Fi', .3, .02)]).price, isNull);
     });
   });
 }

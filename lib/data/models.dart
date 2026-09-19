@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:flutter/material.dart' show ThemeMode;
 
+import '../core/dates.dart';
+
 final _rng = Random();
 
 /// A UUID v4.
@@ -21,173 +23,6 @@ String newId() {
 
 DateTime? _date(Object? v) => v == null ? null : DateTime.parse(v as String);
 
-enum ItemKind { need, want }
-
-class WishItem {
-  WishItem({
-    String? id,
-    required this.name,
-    required this.price,
-    int? originalPrice,
-    required this.kind,
-    this.url,
-    DateTime? createdAt,
-    this.order = 0,
-    this.needCheckedCycle,
-    this.outOfReachSince,
-  }) : id = id ?? newId(),
-       originalPrice = originalPrice ?? price,
-       createdAt = createdAt ?? DateTime.now();
-
-  final String id;
-  String name;
-  int price;
-
-  /// Price when first added — lets "In reach" say how much waiting saved.
-  int originalPrice;
-  ItemKind kind;
-  String? url;
-  final DateTime createdAt;
-  double order;
-
-  /// Cycle key in which the user last confirmed this is truly a need.
-  String? needCheckedCycle;
-
-  /// Set when a want falls below the reach line; cleared once acknowledged.
-  DateTime? outOfReachSince;
-
-  String? get domain {
-    final u = url;
-    if (u == null) return null;
-    final host = Uri.tryParse(u)?.host;
-    if (host == null || host.isEmpty) return null;
-    return host.replaceFirst(RegExp(r'^(www\d?|m)\.'), '');
-  }
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'name': name,
-    'price': price,
-    'originalPrice': originalPrice,
-    'kind': kind.name,
-    'url': url,
-    'createdAt': createdAt.toIso8601String(),
-    'order': order,
-    'needCheckedCycle': needCheckedCycle,
-    'outOfReachSince': outOfReachSince?.toIso8601String(),
-  };
-
-  factory WishItem.fromJson(Map<String, dynamic> j) => WishItem(
-    id: j['id'] as String,
-    name: j['name'] as String,
-    price: j['price'] as int,
-    originalPrice: j['originalPrice'] as int?,
-    kind: ItemKind.values.byName(j['kind'] as String),
-    url: j['url'] as String?,
-    createdAt: _date(j['createdAt']),
-    order: (j['order'] as num?)?.toDouble() ?? 0,
-    needCheckedCycle: j['needCheckedCycle'] as String?,
-    outOfReachSince: _date(j['outOfReachSince']),
-  );
-}
-
-class Spend {
-  Spend({String? id, required this.name, required this.amount, DateTime? date, this.item})
-    : id = id ?? newId(),
-      date = date ?? DateTime.now();
-
-  final String id;
-  String name;
-  int amount;
-  DateTime date;
-
-  /// Snapshot of the wishlist item this purchase came from, so it can be put back.
-  final Map<String, dynamic>? item;
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'name': name,
-    'amount': amount,
-    'date': date.toIso8601String(),
-    'item': item,
-  };
-
-  factory Spend.fromJson(Map<String, dynamic> j) => Spend(
-    id: j['id'] as String,
-    name: j['name'] as String,
-    amount: j['amount'] as int,
-    date: _date(j['date']),
-    item: (j['item'] as Map?)?.cast<String, dynamic>(),
-  );
-}
-
-class ListEntry {
-  ListEntry({String? id, required this.name, required this.price, this.done = false}) : id = id ?? newId();
-
-  final String id;
-  String name;
-  int price;
-  bool done;
-
-  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'price': price, 'done': done};
-
-  factory ListEntry.fromJson(Map<String, dynamic> j) => ListEntry(
-    id: j['id'] as String,
-    name: j['name'] as String,
-    price: j['price'] as int,
-    done: j['done'] as bool? ?? false,
-  );
-}
-
-class NamedList {
-  NamedList({String? id, required this.name, this.budget, List<ListEntry>? entries, DateTime? createdAt})
-    : id = id ?? newId(),
-      entries = entries ?? [],
-      createdAt = createdAt ?? DateTime.now();
-
-  final String id;
-  String name;
-  int? budget;
-  final List<ListEntry> entries;
-  final DateTime createdAt;
-
-  int get doneCount => entries.where((e) => e.done).length;
-  int get total => entries.fold(0, (s, e) => s + e.price);
-
-  /// Index of the first entry that no longer fits the list budget, or null.
-  int? get reachBreak {
-    final b = budget;
-    if (b == null) return null;
-    var running = 0;
-    for (var i = 0; i < entries.length; i++) {
-      running += entries[i].price;
-      if (running > b) return i;
-    }
-    return null;
-  }
-
-  int get inBudgetTotal {
-    final cut = reachBreak ?? entries.length;
-    return entries.take(cut).fold(0, (s, e) => s + e.price);
-  }
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'name': name,
-    'budget': budget,
-    'entries': entries.map((e) => e.toJson()).toList(),
-    'createdAt': createdAt.toIso8601String(),
-  };
-
-  factory NamedList.fromJson(Map<String, dynamic> j) => NamedList(
-    id: j['id'] as String,
-    name: j['name'] as String,
-    budget: j['budget'] as int?,
-    entries: (j['entries'] as List).map((e) => ListEntry.fromJson((e as Map).cast())).toList(),
-    createdAt: _date(j['createdAt']),
-  );
-}
-
 /// How an expense was divided.
 ///
 /// [equal] is the overwhelming default. The rest exist because real bills are
@@ -203,6 +38,7 @@ class Member {
     this.email,
     this.phone,
     this.userId,
+    this.nudgedAt,
   }) : id = id ?? newId();
 
   final String id;
@@ -215,7 +51,8 @@ class Member {
   /// today, but the match is kept open to both.
   String? email;
 
-  /// E.164.
+  /// E.164. Also what a nudge is sent to, so it is worth having even for
+  /// someone who will never install Mull.
   String? phone;
 
   /// Null while the seat is still a placeholder — nobody has claimed it.
@@ -227,6 +64,10 @@ class Member {
   /// Their UPI address, so settling up is one tap instead of a screenshot and
   /// a retyped amount.
   String? upiId;
+
+  /// When you last chased them. Kept on this phone only: it exists to stop
+  /// *you* nagging twice in an hour, not to tell them off.
+  DateTime? nudgedAt;
 
   String get initials {
     final parts = name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
@@ -246,6 +87,7 @@ class Member {
     'email': email,
     'phone': phone,
     'userId': userId,
+    'nudgedAt': nudgedAt?.toIso8601String(),
   };
 
   factory Member.fromJson(Map<String, dynamic> j) => Member(
@@ -256,6 +98,7 @@ class Member {
     email: j['email'] as String?,
     phone: j['phone'] as String?,
     userId: j['userId'] as String?,
+    nudgedAt: _date(j['nudgedAt']),
   );
 }
 
@@ -268,7 +111,8 @@ class Expense {
     required this.payerId,
     required this.shares,
     this.method = SplitMethod.equal,
-    this.repeatsMonthly = false,
+    this.recurringId,
+    this.note,
     DateTime? date,
   }) : id = id ?? newId(),
        date = date ?? DateTime.now();
@@ -288,11 +132,19 @@ class Expense {
   /// Kept for editing: the resolved shares alone cannot say how they were made.
   SplitMethod method;
 
-  /// Rent, wifi and the maid are the same number every month. This only records
-  /// the intent — Mull offers to add next month's when the time comes rather
-  /// than creating expenses behind anyone's back.
-  bool repeatsMonthly;
+  /// The schedule this came off, if it came off one.
+  ///
+  /// An id rather than a flag, because "has this period already been added?"
+  /// has to be answerable exactly. The old version matched on the description,
+  /// which said yes to any expense someone happened to name "Rent".
+  String? recurringId;
+
+  /// Whatever needed saying — "includes Dev's half of the deposit".
+  String? note;
+
   DateTime date;
+
+  bool get isRecurring => recurringId != null;
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -301,7 +153,8 @@ class Expense {
     'payerId': payerId,
     'shares': shares,
     'method': method.name,
-    'repeatsMonthly': repeatsMonthly,
+    'recurringId': recurringId,
+    'note': note,
     'date': date.toIso8601String(),
   };
 
@@ -312,8 +165,146 @@ class Expense {
     payerId: j['payerId'] as String,
     shares: (j['shares'] as Map).map((k, v) => MapEntry(k as String, (v as num).toInt())),
     method: SplitMethod.values.byName(j['method'] as String? ?? 'equal'),
-    repeatsMonthly: j['repeatsMonthly'] as bool? ?? false,
+    recurringId: j['recurringId'] as String?,
+    note: j['note'] as String?,
     date: _date(j['date']),
+  );
+}
+
+/// How often a standing expense comes round.
+enum Frequency { weekly, fortnightly, monthly, quarterly, yearly }
+
+extension FrequencyLabel on Frequency {
+  String get label => switch (this) {
+    Frequency.weekly => 'Every week',
+    Frequency.fortnightly => 'Every 2 weeks',
+    Frequency.monthly => 'Every month',
+    Frequency.quarterly => 'Every 3 months',
+    Frequency.yearly => 'Every year',
+  };
+
+  String get shortLabel => switch (this) {
+    Frequency.weekly => 'weekly',
+    Frequency.fortnightly => 'fortnightly',
+    Frequency.monthly => 'monthly',
+    Frequency.quarterly => 'quarterly',
+    Frequency.yearly => 'yearly',
+  };
+
+  /// The next occurrence after [from].
+  DateTime next(DateTime from) => switch (this) {
+    Frequency.weekly => from.add(const Duration(days: 7)),
+    Frequency.fortnightly => from.add(const Duration(days: 14)),
+    Frequency.monthly => addMonths(from, 1),
+    Frequency.quarterly => addMonths(from, 3),
+    Frequency.yearly => addMonths(from, 12),
+  };
+}
+
+/// A standing expense: rent, wifi, the maid, the Netflix everyone chips in for.
+///
+/// The schedule is a separate thing from the expenses it produces, and that
+/// separation is the whole design. Rent changes, people move out, and the month
+/// somebody was away is a month the split was different — so each occurrence is
+/// a real expense that can be edited or deleted on its own, and the schedule
+/// only ever says "this is due again".
+///
+/// Nothing is created behind anyone's back unless [autoAdd] is switched on, and
+/// even then Mull says so afterwards rather than silently.
+class Recurring {
+  Recurring({
+    String? id,
+    required this.description,
+    required this.amount,
+    required this.payerId,
+    required this.shares,
+    this.method = SplitMethod.equal,
+    this.frequency = Frequency.monthly,
+    required this.nextDue,
+    this.endsOn,
+    this.paused = false,
+    this.autoAdd = false,
+    this.lastAddedOn,
+    DateTime? createdAt,
+  }) : id = id ?? newId(),
+       createdAt = createdAt ?? DateTime.now();
+
+  final String id;
+  String description;
+  int amount;
+  String payerId;
+  Map<String, int> shares;
+  SplitMethod method;
+  Frequency frequency;
+
+  /// Local midnight of the day the next occurrence is owed.
+  DateTime nextDue;
+
+  /// The lease ends in June. Null means it runs until someone stops it.
+  DateTime? endsOn;
+
+  /// "We're between flatmates" — keeps the schedule without it piling up.
+  bool paused;
+
+  /// Add the occurrence without asking. Off by default: an expense that appears
+  /// on its own is one nobody checked.
+  bool autoAdd;
+
+  DateTime? lastAddedOn;
+  final DateTime createdAt;
+
+  bool get hasEnded => endsOn != null && nextDue.isAfter(endsOn!);
+
+  bool get isActive => !paused && !hasEnded;
+
+  /// Whether this period is owed as of [now].
+  bool isDue(DateTime now) => isActive && !nextDue.isAfter(dayOf(now));
+
+  /// Moves the schedule on one period, skipping any it has fallen behind by.
+  ///
+  /// A phone that was off for three months should not produce three months of
+  /// back-rent the moment it wakes up — it should be due once, now. Catching up
+  /// silently is how a scheduler turns a holiday into a ₹90,000 surprise.
+  void advance(DateTime now) {
+    final today = dayOf(now);
+    var next = frequency.next(nextDue);
+    var guard = 0;
+    while (next.isBefore(today) && guard++ < 600) {
+      next = frequency.next(next);
+    }
+    nextDue = next;
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'description': description,
+    'amount': amount,
+    'payerId': payerId,
+    'shares': shares,
+    'method': method.name,
+    'frequency': frequency.name,
+    'nextDue': nextDue.toIso8601String(),
+    'endsOn': endsOn?.toIso8601String(),
+    'paused': paused,
+    'autoAdd': autoAdd,
+    'lastAddedOn': lastAddedOn?.toIso8601String(),
+    'createdAt': createdAt.toIso8601String(),
+  };
+
+  factory Recurring.fromJson(Map<String, dynamic> j) => Recurring(
+    id: j['id'] as String,
+    description: j['description'] as String,
+    amount: j['amount'] as int,
+    payerId: j['payerId'] as String,
+    shares: (j['shares'] as Map).map((k, v) => MapEntry(k as String, (v as num).toInt())),
+    method: SplitMethod.values.byName(j['method'] as String? ?? 'equal'),
+    frequency: Frequency.values.byName(j['frequency'] as String? ?? 'monthly'),
+    nextDue: _date(j['nextDue'])!,
+    endsOn: _date(j['endsOn']),
+    paused: j['paused'] as bool? ?? false,
+    autoAdd: j['autoAdd'] as bool? ?? false,
+    lastAddedOn: _date(j['lastAddedOn']),
+    createdAt: _date(j['createdAt']),
   );
 }
 
@@ -380,26 +371,40 @@ class Settlement {
   );
 }
 
+/// A shared ledger, and how it is presented.
+///
+/// [direct] is the same machinery with two seats and no name of its own — what
+/// you owe one person, outside any trip or flat. It is a group underneath
+/// because a two-person ledger and a ten-person ledger are the same arithmetic,
+/// the same settlement loop and the same rows on the server; making it a
+/// separate concept would mean writing all of that twice and syncing it twice.
+enum GroupKind { group, direct }
+
 class Group {
   Group({
     String? id,
     required this.name,
+    this.kind = GroupKind.group,
     List<Member>? members,
     List<Expense>? expenses,
     List<Settlement>? settlements,
+    List<Recurring>? recurring,
     DateTime? createdAt,
     this.syncedAt,
   }) : id = id ?? newId(),
        members = members ?? [],
        expenses = expenses ?? [],
        settlements = settlements ?? [],
+       recurring = recurring ?? [],
        createdAt = createdAt ?? DateTime.now();
 
   final String id;
   String name;
+  final GroupKind kind;
   final List<Member> members;
   final List<Expense> expenses;
   final List<Settlement> settlements;
+  final List<Recurring> recurring;
   final DateTime createdAt;
 
   /// When the server last accepted this group. Null means it has never been
@@ -413,10 +418,19 @@ class Group {
 
   bool get hasReachedServer => syncedAt != null;
 
+  bool get isDirect => kind == GroupKind.direct;
+
   int get total => expenses.fold(0, (s, e) => s + e.amount);
 
   Member? memberById(String id) => members.where((m) => m.id == id).firstOrNull;
   Member? get you => members.where((m) => m.isYou).firstOrNull;
+
+  /// The other seat in a direct ledger. Null in a real group.
+  Member? get counterpart =>
+      isDirect ? members.where((m) => !m.isYou).firstOrNull : null;
+
+  /// What this ledger is called on screen. A direct ledger is a person.
+  String get title => isDirect ? (counterpart?.name ?? name) : name;
 
   /// What each person is up or down by, netted across every expense and
   /// settlement. Positive means the group owes them; negative means they owe it.
@@ -458,44 +472,43 @@ class Group {
     return me == null ? const [] : pendingSettlements.where((s) => s.toId == me).toList();
   }
 
+  Recurring? recurringById(String id) => recurring.where((r) => r.id == id).firstOrNull;
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
+    'kind': kind.name,
     'members': members.map((m) => m.toJson()).toList(),
     'expenses': expenses.map((e) => e.toJson()).toList(),
     'settlements': settlements.map((s) => s.toJson()).toList(),
+    'recurring': recurring.map((r) => r.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
     'syncedAt': syncedAt?.toIso8601String(),
   };
 
-  /// Groups saved before expenses existed carried a `target` and a pledge per
-  /// member. There is no honest way to turn "said they'd put in ₹6,000" into a
-  /// ledger entry — nobody recorded who actually paid — so the people carry
-  /// over and the numbers do not.
   factory Group.fromJson(Map<String, dynamic> j) => Group(
     id: j['id'] as String,
     name: j['name'] as String,
+    kind: GroupKind.values.byName(j['kind'] as String? ?? 'group'),
     members: (j['members'] as List).map((m) => Member.fromJson((m as Map).cast())).toList(),
     expenses: (j['expenses'] as List? ?? []).map((e) => Expense.fromJson((e as Map).cast())).toList(),
     settlements: (j['settlements'] as List? ?? []).map((s) => Settlement.fromJson((s as Map).cast())).toList(),
+    recurring: (j['recurring'] as List? ?? []).map((r) => Recurring.fromJson((r as Map).cast())).toList(),
     createdAt: _date(j['createdAt']),
-    syncedAt: j['syncedAt'] == null ? null : DateTime.tryParse(j['syncedAt'] as String),
+    syncedAt: _date(j['syncedAt']),
   );
 }
 
 class Profile {
   Profile({
     this.name = '',
-    this.monthlyBudget = 0,
-    this.resetDay = 1,
     this.theme = ThemeMode.system,
     this.onboarded = false,
     this.upiId,
+    this.phone,
   });
 
   String name;
-  int monthlyBudget;
-  int resetDay;
   ThemeMode theme;
   bool onboarded;
 
@@ -503,23 +516,24 @@ class Profile {
   /// pay you back without asking for it every time.
   String? upiId;
 
+  /// E.164, optional. Only used so someone can find you by number.
+  String? phone;
+
   String get initial => name.trim().isEmpty ? '·' : name.trim()[0].toUpperCase();
 
   Map<String, dynamic> toJson() => {
     'name': name,
-    'monthlyBudget': monthlyBudget,
-    'resetDay': resetDay,
     'theme': theme.name,
     'onboarded': onboarded,
     'upiId': upiId,
+    'phone': phone,
   };
 
   factory Profile.fromJson(Map<String, dynamic> j) => Profile(
     name: j['name'] as String? ?? '',
-    monthlyBudget: j['monthlyBudget'] as int? ?? 0,
-    resetDay: j['resetDay'] as int? ?? 1,
     theme: ThemeMode.values.byName(j['theme'] as String? ?? 'system'),
     onboarded: j['onboarded'] as bool? ?? false,
     upiId: j['upiId'] as String?,
+    phone: j['phone'] as String?,
   );
 }

@@ -28,6 +28,31 @@ class GroupsSync {
 
   bool get _live => Backend.isAvailable && Backend.isSignedIn;
 
+  /// Whether the project has had `20260919120000_recurring_and_direct.sql`
+  /// applied — schedules, one-to-one ledgers and expense notes.
+  ///
+  /// Probed once rather than assumed, because an upsert naming a column that
+  /// does not exist fails the *whole* batch. Without this, a phone that has
+  /// updated ahead of the database would stop syncing groups entirely, and the
+  /// symptom would be "my expenses vanished on my other phone" rather than
+  /// anything pointing at a migration.
+  bool? _extended;
+
+  Future<bool> _hasExtendedSchema() async {
+    if (_extended != null) return _extended!;
+    try {
+      await Backend.client.from('recurring_expenses').select('id').limit(1);
+      _extended = true;
+    } catch (_) {
+      _extended = false;
+      debugPrint(
+        'mull: this project predates the recurring migration — run `supabase db push`. '
+        'Groups still sync; schedules and notes stay on this phone until then.',
+      );
+    }
+    return _extended!;
+  }
+
   /// Points the store's group mutations at this sync.
   void attachTo(MullStore store) {
     store
@@ -96,15 +121,20 @@ class GroupsSync {
     if (!_live || _busy) return;
     _busy = true;
     try {
+      final extended = await _hasExtendedSchema();
       final rows = await Backend.client
           .from('groups')
           .select('''
-            id, name, created_at,
+            id, name, created_at${extended ? ', kind' : ''},
             members ( id, user_id, name, email, phone, upi_id,
                       account:user_id ( name, upi_id ) ),
             expenses ( id, description, amount, payer_member_id, method,
-                       repeats_monthly, spent_on, deleted_at,
-                       expense_shares ( member_id, amount ) ),
+                       repeats_monthly, spent_on, deleted_at${extended ? ', recurring_id, note' : ''},
+                       expense_shares ( member_id, amount ) )${extended ? ''',
+            recurring_expenses ( id, description, amount, payer_member_id, method,
+                                 frequency, next_due, ends_on, paused, auto_add,
+                                 last_added_on, created_at, deleted_at,
+                                 recurring_shares ( member_id, amount ) )''' : ''},
             settlements ( id, from_member_id, to_member_id, amount, status,
                           utr, claimed_at, confirmed_at )
           ''')
@@ -113,7 +143,7 @@ class GroupsSync {
 
       final me = Backend.user?.id;
       final groups = [for (final row in rows as List) _group(row as Map<String, dynamic>, me)];
-      _store.replaceGroups(groups);
+      _store.replaceGroups(groups, keepLocalSchedules: !extended);
     } catch (e) {
       // A failed pull leaves what is already on screen alone. Blanking the
       // groups because the train went into a tunnel would be worse than stale.
@@ -169,8 +199,34 @@ class GroupsSync {
               s['member_id'] as String: (s['amount'] as num).toInt(),
           },
           method: SplitMethod.values.byName(e['method'] as String? ?? 'equal'),
-          repeatsMonthly: e['repeats_monthly'] as bool? ?? false,
+          recurringId: e['recurring_id'] as String?,
+          note: e['note'] as String?,
           date: DateTime.parse(e['spent_on'] as String),
+        ),
+      );
+    }
+
+    final recurring = <Recurring>[];
+    for (final r in (row['recurring_expenses'] as List? ?? const [])) {
+      if (r['deleted_at'] != null) continue;
+      recurring.add(
+        Recurring(
+          id: r['id'] as String,
+          description: r['description'] as String? ?? '',
+          amount: (r['amount'] as num).toInt(),
+          payerId: r['payer_member_id'] as String,
+          shares: {
+            for (final s in (r['recurring_shares'] as List? ?? const []))
+              s['member_id'] as String: (s['amount'] as num).toInt(),
+          },
+          method: SplitMethod.values.byName(r['method'] as String? ?? 'equal'),
+          frequency: Frequency.values.byName(r['frequency'] as String? ?? 'monthly'),
+          nextDue: DateTime.parse(r['next_due'] as String),
+          endsOn: r['ends_on'] == null ? null : DateTime.parse(r['ends_on'] as String),
+          paused: r['paused'] as bool? ?? false,
+          autoAdd: r['auto_add'] as bool? ?? false,
+          lastAddedOn: r['last_added_on'] == null ? null : DateTime.parse(r['last_added_on'] as String),
+          createdAt: DateTime.parse(r['created_at'] as String),
         ),
       );
     }
@@ -192,9 +248,11 @@ class GroupsSync {
     return Group(
       id: row['id'] as String,
       name: row['name'] as String? ?? '',
+      kind: GroupKind.values.byName(row['kind'] as String? ?? 'group'),
       members: members,
       expenses: expenses,
       settlements: settlements,
+      recurring: recurring,
       createdAt: DateTime.parse(row['created_at'] as String),
       // It came from the server, so by definition the server has it.
       syncedAt: DateTime.now(),
@@ -210,6 +268,8 @@ class GroupsSync {
     final me = Backend.user?.id;
     if (me == null) return;
 
+    final extended = await _hasExtendedSchema();
+
     try {
       final db = Backend.client;
       // Authorship columns are sent, and sending them is *not* the client
@@ -224,7 +284,12 @@ class GroupsSync {
       // Postgres has the last word regardless — the stamp triggers set these on
       // insert and restore them on update — so what goes up here only has to be
       // non-null. Whatever we send, a row keeps the author it actually had.
-      await db.from('groups').upsert({'id': group.id, 'name': group.name, 'created_by': me});
+      await db.from('groups').upsert({
+        'id': group.id,
+        'name': group.name,
+        'created_by': me,
+        if (extended) 'kind': group.kind.name,
+      });
 
       // One batch, and `user_id` sent plainly — including when it is null.
       //
@@ -260,6 +325,34 @@ class GroupsSync {
           },
       ]);
 
+      // Schedules go up before the expenses that reference them, or the foreign
+      // key on `recurring_id` has nothing to point at.
+      if (extended && group.recurring.isNotEmpty) {
+        await db.from('recurring_expenses').upsert([
+          for (final r in group.recurring)
+            {
+              'id': r.id,
+              'group_id': group.id,
+              'description': r.description,
+              'amount': r.amount,
+              'payer_member_id': r.payerId,
+              'method': r.method.name,
+              'frequency': r.frequency.name,
+              'next_due': _day(r.nextDue),
+              'ends_on': r.endsOn == null ? null : _day(r.endsOn!),
+              'paused': r.paused,
+              'auto_add': r.autoAdd,
+              'last_added_on': r.lastAddedOn == null ? null : _day(r.lastAddedOn!),
+              'created_by': me,
+            },
+        ]);
+        await db.from('recurring_shares').upsert([
+          for (final r in group.recurring)
+            for (final entry in r.shares.entries)
+              {'recurring_id': r.id, 'member_id': entry.key, 'amount': entry.value},
+        ]);
+      }
+
       if (group.expenses.isNotEmpty) {
         await db.from('expenses').upsert([
           for (final e in group.expenses)
@@ -270,9 +363,15 @@ class GroupsSync {
               'amount': e.amount,
               'payer_member_id': e.payerId,
               'method': e.method.name,
-              'repeats_monthly': e.repeatsMonthly,
-              'spent_on': e.date.toIso8601String().substring(0, 10),
+              // Still sent, and still NOT NULL on the server. It is derived
+              // now — true exactly when the expense came off a schedule — but
+              // a NOT NULL column that stops being sent is a failed push, so
+              // it keeps being sent.
+              'repeats_monthly': e.isRecurring,
+              'spent_on': _day(e.date),
               'created_by': me,
+              if (extended) 'recurring_id': e.recurringId,
+              if (extended) 'note': e.note,
             },
         ]);
         await db.from('expense_shares').upsert([
@@ -311,12 +410,19 @@ class GroupsSync {
       // reports both as 42501.
       final session = Backend.session;
       debugPrint(
-        'mull: PUSH FAILED for "${group.name}" — it is on this phone only. $e\n'
+        'mull: PUSH FAILED for "${group.title}" — it is on this phone only. $e\n'
         'mull:   uid=${Backend.user?.id} hasSession=${session != null} '
         'expired=${session?.isExpired} expiresAt=${session?.expiresAt}',
       );
     }
   }
+
+  /// A `date` column wants a date, not an instant. Sending the ISO timestamp
+  /// works until someone in IST adds rent at half past midnight and it lands on
+  /// the day before.
+  static String _day(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
 
   /// Soft delete: a balance that silently changes is a balance nobody trusts.
   Future<void> deleteGroup(String groupId) async {
@@ -341,6 +447,12 @@ class GroupsSync {
       ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'settlements', callback: _bump)
       ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'members', callback: _bump)
       ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'groups', callback: _bump)
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: 'recurring_expenses',
+        callback: _bump,
+      )
       ..subscribe();
   }
 

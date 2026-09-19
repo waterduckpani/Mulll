@@ -8,7 +8,7 @@ import 'data/remote/backend.dart';
 import 'data/remote/groups_sync.dart';
 import 'data/store.dart';
 import 'screens/onboarding_flow.dart';
-import 'screens/shell.dart';
+import 'screens/app_shell.dart';
 import 'screens/not_configured_screen.dart';
 import 'ui/tokens.dart';
 
@@ -20,7 +20,7 @@ Future<void> main() async {
   // no project wired up, or a phone with no signal, is a working Mull.
   final store = await MullStore.load();
   // `flutter run --dart-define=MULL_SAMPLE=true` starts with the mockup data.
-  if (const bool.fromEnvironment('MULL_SAMPLE') && store.items.isEmpty) store.loadSample();
+  if (const bool.fromEnvironment('MULL_SAMPLE') && store.groups.isEmpty) store.loadSample();
 
   await Backend.init();
   final sync = GroupsSync(store)
@@ -123,7 +123,7 @@ class _RootState extends State<_Root> {
       // rather than back at "here is what Mull is".
       screen = const OnboardingFlow(key: ValueKey('onboarding'));
     } else {
-      screen = const Shell(key: ValueKey('shell'));
+      screen = const AppShell(key: ValueKey('shell'));
     }
 
     return AnimatedSwitcher(duration: const Duration(milliseconds: 500), child: screen);

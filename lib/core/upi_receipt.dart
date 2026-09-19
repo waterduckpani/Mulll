@@ -10,7 +10,7 @@
 library;
 
 import 'money.dart';
-import 'screenshot_reader.dart';
+import 'ocr.dart';
 
 class UpiReceipt {
   const UpiReceipt({this.amount, this.utr, this.payeeUpiId, this.payeeName, this.failed = false});

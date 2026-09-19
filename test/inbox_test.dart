@@ -1,7 +1,6 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mull/core/inbox.dart';
-import 'package:mull/data/models.dart';
 
 void main() {
   const channel = MethodChannel('mull/screenshot');
@@ -31,70 +30,7 @@ void main() {
     expect(await Inbox.drain(), isEmpty);
   });
 
-  test('a shared screenshot runs through the screenshot parser', () async {
-    mockInbox([
-      {
-        'kind': 'image',
-        'lines': [
-          line('zara.com', .04, .012),
-          line('RIBBED KNIT CARDIGAN', .30, .030),
-          line('₹3,590', .36, .034),
-        ],
-      },
-    ]);
-
-    final items = await Inbox.drain();
-    expect(items, hasLength(1));
-    final shot = items.single as SharedShot;
-    // tidyTitle trims and truncates but never recases — Zara's shouty caps
-    // survive into the sheet, where the user can edit them.
-    expect(shot.read.name, 'RIBBED KNIT CARDIGAN');
-    expect(shot.read.price, 3590);
-    expect(shot.read.domain, 'zara.com');
-  });
-
-  test('an item settled in the share sheet arrives ready to add', () async {
-    mockInbox([
-      {
-        'kind': 'resolved',
-        'name': '  Ribbed knit cardigan ',
-        'price': 3590,
-        'itemKind': 'need',
-        'url': 'https://www.zara.com/in/en/cardigan-p123.html',
-      },
-      {'kind': 'resolved', 'name': 'Filter coffee kit', 'price': 1850, 'itemKind': 'want'},
-    ]);
-
-    final items = await Inbox.drain();
-    expect(items, hasLength(2));
-    final first = items.first as SharedItem;
-    expect(first.name, 'Ribbed knit cardigan', reason: 'the share sheet lets stray whitespace through');
-    expect(first.price, 3590);
-    expect(first.kind, ItemKind.need);
-    expect(first.url, contains('zara.com'));
-    expect((items.last as SharedItem).kind, ItemKind.want);
-  });
-
-  test('a half-finished resolved entry is dropped rather than added blind', () async {
-    // These only exist because the user answered. A missing answer means the
-    // extension should have queued the raw share instead, so trust nothing.
-    mockInbox([
-      {'kind': 'resolved', 'name': 'No price', 'itemKind': 'want'},
-      {'kind': 'resolved', 'name': '  ', 'price': 900, 'itemKind': 'want'},
-      {'kind': 'resolved', 'name': 'Free thing', 'price': 0, 'itemKind': 'want'},
-    ]);
-    expect(await Inbox.drain(), isEmpty);
-  });
-
-  test('an unknown kind defaults to a want rather than reserving budget', () async {
-    mockInbox([
-      {'kind': 'resolved', 'name': 'Mystery', 'price': 500},
-    ]);
-    expect((await Inbox.drain()).single, isA<SharedItem>());
-    expect(((await Inbox.drain()).single as SharedItem).kind, ItemKind.want);
-  });
-
-  test('a UPI receipt is recognised as a payment, not a thing to buy', () async {
+  test('a UPI receipt comes through with its amount, payee and reference', () async {
     mockInbox([
       {
         'kind': 'image',
@@ -108,28 +44,29 @@ void main() {
       },
     ]);
 
-    final shot = (await Inbox.drain()).single as SharedShot;
-    expect(shot.looksLikePayment, isTrue);
-    expect(shot.receipt!.amount, 1240);
-    expect(shot.receipt!.utr, '528401234567');
-    expect(shot.receipt!.payeeUpiId, 'kabirv@ybl');
+    final shared = (await Inbox.drain()).single;
+    expect(shared.isUsable, isTrue);
+    expect(shared.receipt.amount, 1240);
+    expect(shared.receipt.utr, '528401234567');
+    expect(shared.receipt.payeeUpiId, 'kabirv@ybl');
+    expect(shared.receipt.payeeName, 'KABIR VERMA');
   });
 
-  test('a product page is never mistaken for a payment', () async {
+  test('a price tag is not a receipt', () async {
+    // An amount on its own proves nothing — a photo of a menu has one of those.
+    // A reference or a payee is what makes it a payment.
     mockInbox([
       {
         'kind': 'image',
         'lines': [
-          line('zara.com', .04, .012),
           line('RIBBED KNIT CARDIGAN', .30, .030),
           line('₹3,590', .36, .034),
         ],
       },
     ]);
 
-    final shot = (await Inbox.drain()).single as SharedShot;
-    expect(shot.looksLikePayment, isFalse, reason: 'no reference and no payee');
-    expect(shot.read.name, 'RIBBED KNIT CARDIGAN');
+    final shared = (await Inbox.drain()).single;
+    expect(shared.isUsable, isFalse, reason: 'no reference and no payee');
   });
 
   test('a failed payment is not offered as a settlement', () async {
@@ -144,8 +81,7 @@ void main() {
       },
     ]);
 
-    final shot = (await Inbox.drain()).single as SharedShot;
-    expect(shot.looksLikePayment, isFalse);
+    expect((await Inbox.drain()).single.isUsable, isFalse);
   });
 
   test('a screenshot nothing could be read from is dropped, not offered', () async {
@@ -159,53 +95,48 @@ void main() {
     expect(await Inbox.drain(), isEmpty);
   });
 
-  test('shared text carrying a link becomes a link, not a name', () async {
-    // Safari hands over "Product name https://…" as a single string.
-    mockInbox([
-      {'kind': 'text', 'text': 'Ribbed cardigan https://www.zara.com/in/en/cardigan-p123.html'},
-    ]);
-
-    final item = (await Inbox.drain()).single;
-    expect(item, isA<SharedLink>());
-    expect((item as SharedLink).url, contains('zara.com'));
-  });
-
-  test('shared text with no link stays a name', () async {
+  test('links and text are dropped now that Mull is only groups', () async {
+    // The share extension can still queue these. There is nowhere for them to
+    // go, and opening a sheet to say so would be worse than silence.
     mockInbox([
       {'kind': 'text', 'text': 'Ribbed knit cardigan'},
+      {'kind': 'link', 'url': 'https://www.zara.com/in/en/cardigan-p123.html'},
+      {'kind': 'resolved', 'name': 'Cardigan', 'price': 3590},
     ]);
-
-    final item = (await Inbox.drain()).single;
-    expect(item, isA<SharedText>());
-    expect((item as SharedText).text, 'Ribbed knit cardigan');
+    expect(await Inbox.drain(), isEmpty);
   });
 
-  test('blank and unknown entries are skipped without killing the drain', () async {
+  test('a malformed entry is skipped without killing the drain', () async {
     mockInbox([
-      {'kind': 'text', 'text': '   '},
       {'kind': 'something-new'},
-      {'kind': 'link'}, // malformed: no url
-      {'kind': 'link', 'url': 'https://allbirds.in/products/wool-runner'},
+      {'kind': 'image'}, // no lines at all
+      {
+        'kind': 'image',
+        'lines': [
+          line('₹900', .2, .04),
+          line('UTR 528401234567', .5, .012),
+        ],
+      },
     ]);
 
     final items = await Inbox.drain();
     expect(items, hasLength(1));
-    expect((items.single as SharedLink).url, contains('allbirds'));
+    expect(items.single.receipt.amount, 900);
   });
 
   test('order is preserved so shares arrive as they were made', () async {
+    Map<String, Object?> receipt(int amount, String utr) => {
+      'kind': 'image',
+      'lines': [line('₹$amount', .2, .04), line('UTR $utr', .5, .012)],
+    };
+
     mockInbox([
-      {'kind': 'link', 'url': 'https://example.com/one'},
-      {'kind': 'link', 'url': 'https://example.com/two'},
-      {'kind': 'link', 'url': 'https://example.com/three'},
+      receipt(100, '111111111111'),
+      receipt(200, '222222222222'),
+      receipt(300, '333333333333'),
     ]);
 
-    final urls = (await Inbox.drain()).map((i) => (i as SharedLink).url).toList();
-    expect(urls, [
-      'https://example.com/one',
-      'https://example.com/two',
-      'https://example.com/three',
-    ]);
+    expect((await Inbox.drain()).map((i) => i.receipt.amount), [100, 200, 300]);
   });
 
   test('a device without the extension installed drains to nothing', () async {

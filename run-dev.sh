@@ -11,8 +11,9 @@
 #
 # --sample used to be on by default, which was a mistake worth remembering:
 # loadSample() sets `onboarded = true` and writes itself into mull.json, so one
-# run left every later launch opening on Ananya's wishlist with no onboarding
-# and no sign-in. It looked like a broken app rather than leftover state.
+# run left every later launch opening on somebody else's groups with no
+# onboarding and no sign-in. It looked like a broken app rather than leftover
+# state.
 #
 # Running plain `flutter run` with no defines is also supported: Mull skips the
 # sign-in gate and stays local-only, with groups on the phone.

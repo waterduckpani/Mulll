@@ -52,8 +52,14 @@ Future<bool> openUpiPayment({
 ///
 /// Group logistics in India live in WhatsApp, so a summary that cannot be
 /// pasted there is a summary nobody sees.
-Future<bool> shareOnWhatsApp(String text) async {
-  final uri = Uri.https('wa.me', '/', {'text': text});
+///
+/// With a [phone] it opens that person's chat directly, which is what turns a
+/// reminder from "compose a message" into "press send". Without one it opens
+/// the contact picker, so a nudge still works for someone whose number Mull
+/// has never been told.
+Future<bool> shareOnWhatsApp(String text, {String? phone}) async {
+  final number = phone?.replaceAll(RegExp(r'[^0-9]'), '');
+  final uri = Uri.https('wa.me', '/${number ?? ''}', {'text': text});
   try {
     return await launchUrl(uri, mode: LaunchMode.externalApplication);
   } catch (_) {

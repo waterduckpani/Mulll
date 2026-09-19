@@ -2,8 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../core/cycle.dart';
-import '../core/money.dart';
 import '../data/remote/auth_service.dart';
 import '../data/remote/backend.dart';
 import '../data/remote/friends_service.dart';
@@ -13,7 +11,6 @@ import '../ui/sheet.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
 import 'friends_sheet.dart';
-import 'money/budget_sheet.dart';
 
 Future<void> showProfileSheet(BuildContext context) =>
     showMullSheet(context, height: 780, builder: (_) => const _ProfileSheet());
@@ -47,7 +44,7 @@ class _AccountRowState extends State<_AccountRow> {
       children: [
         Text('Signed in as $email', style: ranade(13, height: 1.6, color: c.ink2)),
         const SizedBox(height: 4),
-        Text('Groups sync. Your wishlist and budget do not.', style: ranade(11.5, color: c.ink3)),
+        Text('Your groups follow the account, not this phone.', style: ranade(11.5, color: c.ink3)),
         const SizedBox(height: 12),
         GhostButton(
           'Sign out',
@@ -159,7 +156,7 @@ class _ProfileSheetState extends State<_ProfileSheet> {
             Text('Start over?', style: excon(28, tracking: -.02, color: sheet.c.ink)),
             const SizedBox(height: 10),
             Text(
-              'Your budget, wishlist, groups and lists are erased from this phone.',
+              'Every group, expense and settlement is erased from this phone.',
               style: ranade(14, height: 1.6, color: sheet.c.ink3),
             ),
             const SizedBox(height: 24),
@@ -216,13 +213,11 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                   hint: 'Your name',
                   capitalization: TextCapitalization.words,
                   onChanged: (v) => store.updateProfile((p) => p.name = v.trim()),
-                  help: const Text('Shown to you in groups. Everything stays on this phone.'),
+                  help: const Text('The name people see next to your share of a bill.'),
                 ),
                 const SizedBox(height: 26),
                 CardRows(
                   children: [
-                    row('Monthly budget', inr(p.monthlyBudget), () => showBudgetSheet(context)),
-                    row('Month starts on', 'the ${ordinal(p.resetDay)}', () => showBudgetSheet(context)),
                     row('Your UPI ID', p.upiId ?? 'Not set', _editUpi),
                     row('Friends', _friendsLabel, () => showFriendsSheet(context)),
                   ],

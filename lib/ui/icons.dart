@@ -1,6 +1,19 @@
 import 'package:flutter/material.dart';
 
-enum MullGlyph { money, wishlist, groups, lists, chevronRight, chevronLeft, close, check, more, plus, arrowUpRight }
+enum MullGlyph {
+  groups,
+  person,
+  repeat,
+  bell,
+  pause,
+  chevronRight,
+  chevronLeft,
+  close,
+  check,
+  more,
+  plus,
+  arrowUpRight,
+}
 
 /// The design's hand-drawn 24×24 stroke icons, painted directly (no SVG dependency).
 class MullIcon extends StatelessWidget {
@@ -40,13 +53,6 @@ class _GlyphPainter extends CustomPainter {
     final fill = Paint()..color = color;
 
     switch (glyph) {
-      case MullGlyph.money:
-        canvas.drawRRect(RRect.fromLTRBR(3, 6, 21, 19, const Radius.circular(4.5)), stroke);
-        canvas.drawCircle(const Offset(16.5, 12.5), 1.3, fill);
-      case MullGlyph.wishlist:
-        canvas.drawLine(const Offset(5, 8), const Offset(19, 8), stroke);
-        canvas.drawLine(const Offset(5, 12.5), const Offset(19, 12.5), stroke);
-        canvas.drawLine(const Offset(5, 17), const Offset(14, 17), stroke);
       case MullGlyph.groups:
         canvas.drawCircle(const Offset(9.5, 10), 3.2, stroke);
         canvas.drawPath(
@@ -57,20 +63,66 @@ class _GlyphPainter extends CustomPainter {
           stroke,
         );
         canvas.drawCircle(const Offset(17, 10.5), 2.3, stroke);
-      case MullGlyph.lists:
+      case MullGlyph.person:
+        canvas.drawCircle(const Offset(12, 8.6), 3.6, stroke);
         canvas.drawPath(
           Path()
-            ..moveTo(7, 4)
-            ..lineTo(17, 4)
-            ..arcToPoint(const Offset(18.5, 5.5), radius: const Radius.circular(1.5))
-            ..lineTo(18.5, 20)
-            ..lineTo(12, 16.2)
-            ..lineTo(5.5, 20)
-            ..lineTo(5.5, 5.5)
-            ..arcToPoint(const Offset(7, 4), radius: const Radius.circular(1.5))
+            ..moveTo(5, 19.5)
+            ..cubicTo(5, 15.8, 8.1, 13.9, 12, 13.9)
+            ..cubicTo(15.9, 13.9, 19, 15.8, 19, 19.5),
+          stroke,
+        );
+      case MullGlyph.repeat:
+        // A loop with an arrowhead at each end — "this comes round again".
+        canvas.drawPath(
+          Path()
+            ..moveTo(6.2, 9.5)
+            ..arcToPoint(const Offset(17.8, 9.5), radius: const Radius.circular(7), clockwise: true),
+          stroke,
+        );
+        canvas.drawPath(
+          Path()
+            ..moveTo(17.8, 14.5)
+            ..arcToPoint(const Offset(6.2, 14.5), radius: const Radius.circular(7), clockwise: true),
+          stroke,
+        );
+        canvas.drawPath(
+          Path()
+            ..moveTo(14.8, 7.6)
+            ..lineTo(17.9, 9.6)
+            ..lineTo(15.1, 11.8),
+          stroke,
+        );
+        canvas.drawPath(
+          Path()
+            ..moveTo(9.2, 16.4)
+            ..lineTo(6.1, 14.4)
+            ..lineTo(8.9, 12.2),
+          stroke,
+        );
+      case MullGlyph.bell:
+        canvas.drawPath(
+          Path()
+            ..moveTo(6.5, 17)
+            ..lineTo(17.5, 17)
+            ..lineTo(16.2, 14.8)
+            ..lineTo(16.2, 11)
+            ..cubicTo(16.2, 8.1, 14.3, 6.2, 12, 6.2)
+            ..cubicTo(9.7, 6.2, 7.8, 8.1, 7.8, 11)
+            ..lineTo(7.8, 14.8)
             ..close(),
           stroke,
         );
+        canvas.drawPath(
+          Path()
+            ..moveTo(10.3, 19.2)
+            ..cubicTo(10.7, 20.1, 11.3, 20.4, 12, 20.4)
+            ..cubicTo(12.7, 20.4, 13.3, 20.1, 13.7, 19.2),
+          stroke,
+        );
+      case MullGlyph.pause:
+        canvas.drawLine(const Offset(9.5, 6.5), const Offset(9.5, 17.5), stroke);
+        canvas.drawLine(const Offset(14.5, 6.5), const Offset(14.5, 17.5), stroke);
       case MullGlyph.chevronRight:
         canvas.drawPath(
           Path()
