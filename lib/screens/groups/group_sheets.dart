@@ -790,7 +790,9 @@ class _MemberSheetState extends State<_MemberSheet> {
 
 // ----------------------------------------------------------------- settings
 
-/// Resolves to 'deleted' when the group was removed.
+/// Resolves to 'deleted' when the group was removed, or 'add-recurring' when
+/// the caller should open the schedule editor once this sheet is out of the
+/// way.
 Future<String?> showGroupSettings(BuildContext context, Group group) =>
     showMullSheet<String>(context, height: 700, builder: (_) => _GroupSettingsSheet(group: group));
 
@@ -938,11 +940,26 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
                   ),
                 ],
                 const SizedBox(height: 26),
-                Eyebrow('Repeating · ${group.recurring.length}'),
+                Eyebrow('Repeating · ${group.recurring.length}', size: 10.5, tracking: .18),
+                const SizedBox(height: 12),
+                // Not a second list of schedules. Recurring is a screen off the
+                // group now, and two ways to see the same thing in two shapes
+                // is how an app starts disagreeing with itself.
+                Text(
+                  group.recurring.isEmpty
+                      ? 'Rent, wifi, the house help. Set one up from Recurring on '
+                            'the group screen and Mull asks when it comes round.'
+                      : 'Open Recurring on the group screen to change what they '
+                            'cost, who pays and when they land.',
+                  style: MullType.caption(c.ink3),
+                ),
                 const SizedBox(height: 12),
                 SecondaryButton(
-                  group.recurring.isEmpty ? 'Set one up' : 'Manage schedules',
-                  onTap: () => showRecurringList(context, group),
+                  'Add a recurring cost',
+                  // Handed back to the group screen rather than opened here:
+                  // this sheet's context is gone the moment it pops, and the
+                  // editor has to outlive it.
+                  onTap: () => Navigator.of(context).pop('add-recurring'),
                 ),
               ],
             ),

@@ -163,7 +163,7 @@ void main() {
     await t.tap(find.bySemanticsLabel(RegExp('^Profile and settings')).hitTestable().last);
     await settle(t);
     await shot(t, '15-profile');
-    await tapText(t, 'How Mull works');
+    await tapText(t, 'How it works');
     await shot(t, '15b-how-it-works');
     await dismissSheet(t);
     await t.tap(find.bySemanticsLabel(RegExp('^Profile and settings')).hitTestable().last);

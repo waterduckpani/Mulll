@@ -42,7 +42,12 @@ class GroupDetailScreen extends StatelessWidget {
 
     Future<void> settings() async {
       final result = await showGroupSettings(context, group);
-      if (result == 'deleted' && context.mounted) Navigator.of(context).pop();
+      if (!context.mounted) return;
+      if (result == 'deleted') {
+        Navigator.of(context).pop();
+      } else if (result == 'add-recurring') {
+        showRecurringEditor(context, group);
+      }
     }
 
     void push(Widget screen) =>
@@ -51,6 +56,11 @@ class GroupDetailScreen extends StatelessWidget {
     // One focal object. Whatever is waiting on an answer takes it; with
     // nothing outstanding, settling up does.
     final somethingWaiting = claims.isNotEmpty || due.isNotEmpty;
+
+    // A group of one is a group that cannot do anything: every split is a
+    // split with yourself. It is easy to end up in by tapping straight through
+    // the create flow, so the screen says so rather than looking broken.
+    final alone = group.members.length < 2;
 
     return MullPage(
       glow: const GlowSpec(size: 440, top: -160, left: -150, right: null),
@@ -119,6 +129,28 @@ class GroupDetailScreen extends StatelessWidget {
             ],
           ),
 
+        if (alone)
+          Surface(
+            lift: Lift.focal,
+            radius: 28,
+            margin: const EdgeInsets.fromLTRB(Gutter.card, 0, Gutter.card, 10),
+            padding: const EdgeInsets.fromLTRB(22, 20, 22, 22),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Eyebrow('Nobody else in here yet', size: 10.5, tracking: .18),
+                const SizedBox(height: 14),
+                Text(
+                  'Add the people you are splitting with and Mull starts working '
+                  'out who owes whom.',
+                  style: MullType.body(c.ink3),
+                ),
+                const SizedBox(height: 20),
+                InlineButton('Add people', height: 48, expand: true, onTap: settings),
+              ],
+            ),
+          ),
+
         Stacked(
           gap: 8,
           padding: const EdgeInsets.symmetric(horizontal: Gutter.card),
@@ -130,7 +162,7 @@ class GroupDetailScreen extends StatelessWidget {
                   : transfers.length == 1
                   ? 'One payment clears the group'
                   : '${_words(transfers.length)} payments clear the group',
-              lift: somethingWaiting ? Lift.card : Lift.focal,
+              lift: somethingWaiting || alone ? Lift.card : Lift.focal,
               onTap: () => push(SettleUpScreen(groupId: group.id)),
             ),
             _Destination(
