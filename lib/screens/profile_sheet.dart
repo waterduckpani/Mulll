@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -254,16 +253,6 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                   onChanged: (i) => store.updateProfile((p) => p.theme = ThemeMode.values[[0, 1, 2][i]]),
                 ),
                 const SizedBox(height: 28),
-                if (kDebugMode) ...[
-                  SecondaryButton(
-                    'Load sample data',
-                    onTap: () {
-                      store.loadSample();
-                      Navigator.of(context).pop();
-                    },
-                  ),
-                  const SizedBox(height: 8),
-                ],
                 SecondaryButton('Start over', onTap: _reset),
               ],
             ),

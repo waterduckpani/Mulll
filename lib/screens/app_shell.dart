@@ -1,13 +1,17 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../core/inbox.dart';
 import '../core/money.dart';
+import '../data/notices.dart';
 import '../data/store.dart';
 import '../ui/sheet.dart';
 import '../ui/tokens.dart';
 import 'groups/group_sheets.dart';
 import 'home_screen.dart';
+import 'notices_sheet.dart';
 
 /// The app around the home screen.
 ///
@@ -26,6 +30,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   final _navigator = GlobalKey<NavigatorState>();
   bool _draining = false;
   MullStore? _store;
+  NoticesInbox? _inbox;
 
   @override
   void initState() {
@@ -41,10 +46,35 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void didChangeDependencies() {
     super.didChangeDependencies();
     _store = context.readStore;
+    final inbox = context.readNotices;
+    if (inbox != _inbox) {
+      _inbox?.arrived.removeListener(_onNoticeArrived);
+      _inbox = inbox?..arrived.addListener(_onNoticeArrived);
+    }
+  }
+
+  /// Puts a notice on screen the moment it lands.
+  ///
+  /// Only ever live arrivals — [NoticesInbox.arrived] fires on the realtime
+  /// insert and on nothing else. Replaying the inbox as banners at launch
+  /// would be a wall of them every morning.
+  void _onNoticeArrived() {
+    final notice = _inbox?.arrived.value;
+    if (notice == null || !mounted) return;
+    // Not over a sheet. Something half-written behind a keyboard is not the
+    // moment to drop a bar over the top of the screen.
+    if (SheetDepth.value.value > 0) return;
+    NoticeBanner.show(
+      context,
+      notice.title,
+      body: notice.body,
+      onTap: () => showNoticesSheet(context, into: _navigator.currentState),
+    );
   }
 
   @override
   void dispose() {
+    _inbox?.arrived.removeListener(_onNoticeArrived);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -53,6 +83,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _store?.refresh();
+      // `refresh()` only re-reads the clock. Coming back from the background is
+      // also the single most likely moment for the screen to be stale — the
+      // socket was suspended and the other person has been adding things — so
+      // ask the server outright.
+      unawaited(_store?.pullNow());
+      // Whatever arrived while the socket was suspended is in the inbox but
+      // not in memory, and the badge is what tells anyone to go and look.
+      unawaited(_inbox?.refresh());
       _announceAutoAdded();
       // Receipts are shared while Mull is backgrounded — you pay in GPay, then
       // come back here — so resuming is the common case, not launching.

@@ -111,28 +111,46 @@ class MullColors extends ThemeExtension<MullColors> {
 
   /// The paper theme. Same geometry and the same rules, inverted: a card is a
   /// slightly lighter paper that lifts off the page rather than a lit surface.
+  ///
+  /// Three of these values were wrong in a way that only shows up on paper,
+  /// and all three came from inverting the dark theme's *numbers* rather than
+  /// its intent:
+  ///
+  ///   - `ink3` at #78746D ran 3.98:1 on this background, under the 4.5:1 that
+  ///     body text needs. It carries every caption, every eyebrow and every
+  ///     line of helper text in the app, so it was the single biggest legibility
+  ///     problem here. #67635C clears 4.5:1 both on the screen (5.1) and on
+  ///     the recessed `quiet` surface it often sits on (4.5) — the second case
+  ///     is the one an eyeballed fix misses.
+  ///   - `quiet` was white at 28%, which on near-white paper is *nothing*. A
+  ///     flat surface is meant to be a recess, so on paper it has to go
+  ///     darker, not lighter — the old value made settled rows, chips and the
+  ///     segmented control's track effectively invisible.
+  ///   - the shadows were faint enough that a card had neither a lift nor an
+  ///     edge, leaving the hierarchy to a 3% difference in fill.
   static const light = MullColors(
     ink: Color(0xFF131211),
-    ink2: Color(0xFF5B5853),
-    ink3: Color(0xFF78746D),
+    ink2: Color(0xFF55524D),
+    ink3: Color(0xFF67635C),
     screen: Color(0xFFEFEDE9),
     pill: Color(0xFF141312),
     pillInk: Color(0xFFF5F4F1),
     glow: Color(0x8AFFFFFF),
-    scrim: Color(0x5C1A1917),
-    surfTop: Color(0xFFFDFCFA),
-    surfBottom: Color(0xFFF6F4F1),
+    scrim: Color(0x701A1917),
+    surfTop: Color(0xFFFFFFFF),
+    surfBottom: Color(0xFFF7F5F2),
     raisedTop: Color(0xFFFFFFFF),
-    raisedBottom: Color(0xFFF9F8F5),
-    quiet: Color(0x47FFFFFF),
-    sheetTop: Color(0xFCFBFAF8),
-    sheetBottom: Color(0xFCF3F1EE),
-    line: Color(0x14131211),
-    sheetLine: Color(0x1F131211),
-    inputLine: Color(0x33131211),
-    shadowFocal: Color(0x1F131211),
-    shadowCard: Color(0x16131211),
-    shadowLow: Color(0x0F131211),
+    raisedBottom: Color(0xFFF8F6F3),
+    // A well in the paper rather than a highlight on it.
+    quiet: Color(0x0F131211),
+    sheetTop: Color(0xFCFCFBF9),
+    sheetBottom: Color(0xFCF2F0ED),
+    line: Color(0x1F131211),
+    sheetLine: Color(0x29131211),
+    inputLine: Color(0x47131211),
+    shadowFocal: Color(0x33131211),
+    shadowCard: Color(0x24131211),
+    shadowLow: Color(0x1A131211),
     isDark: false,
   );
 
@@ -141,7 +159,7 @@ class MullColors extends ThemeExtension<MullColors> {
   MullColors get insideSheet => MullColors(
     ink: ink,
     ink2: ink2,
-    ink3: isDark ? const Color(0xFF9A968F) : const Color(0xFF6F6B64),
+    ink3: isDark ? const Color(0xFF9A968F) : const Color(0xFF635F58),
     screen: sheetBottom,
     pill: pill,
     pillInk: pillInk,
@@ -162,9 +180,6 @@ class MullColors extends ThemeExtension<MullColors> {
     shadowLow: shadowLow,
     isDark: isDark,
   );
-
-  /// The create flow sits on a darker field than the rest of the app.
-  Color get flowInk3 => isDark ? const Color(0xFF8B877F) : const Color(0xFF7D7972);
 
   @override
   MullColors copyWith() => this;

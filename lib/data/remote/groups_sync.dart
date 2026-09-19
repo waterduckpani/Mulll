@@ -24,12 +24,32 @@ class GroupsSync {
   final MullStore _store;
   RealtimeChannel? _channel;
   Timer? _debounce;
+  Timer? _poll;
   bool _busy = false;
+
+  /// Something asked for a pull while one was already running. Without this the
+  /// request is simply dropped, and the change that prompted it never appears:
+  /// a pull started 30ms before somebody else's expense landed returns rows
+  /// that predate it, and the event announcing it has already been consumed.
+  bool _again = false;
+
+  /// How often to ask anyway.
+  ///
+  /// Realtime carries the change in well under a second when it is working, and
+  /// the honest position is that it is not always working — a websocket through
+  /// a phone's radio drops, reconnects, and says nothing about the events in
+  /// between. This is the floor: at worst the other phone is this far behind,
+  /// rather than behind until someone relaunches the app.
+  static const _pollEvery = Duration(seconds: 20);
 
   bool get _live => Backend.isAvailable && Backend.isSignedIn;
 
-  /// Whether the project has had `20260919120000_recurring_and_direct.sql`
-  /// applied — schedules, one-to-one ledgers and expense notes.
+  /// Whether the project has had the 2026-09-19/20 migrations applied —
+  /// schedules, one-to-one ledgers, expense notes, group icons and who
+  /// administers a group.
+  ///
+  /// One flag for all of them because they went up together, and one probe is
+  /// cheaper than five.
   ///
   /// Probed once rather than assumed, because an upsert naming a column that
   /// does not exist fails the *whole* batch. Without this, a phone that has
@@ -57,7 +77,12 @@ class GroupsSync {
   void attachTo(MullStore store) {
     store
       ..onGroupChanged = push
-      ..onGroupDeleted = deleteGroup;
+      ..onGroupDeleted = deleteGroup
+      // [resume] rather than [pull]: every caller of `pullNow()` — a resume, a
+      // pull-to-refresh — is someone asking "is this current?", and a dead
+      // socket is the most likely reason it is not. Repairing it is part of
+      // answering.
+      ..onPullRequested = resume;
   }
 
   StreamSubscription<AuthState>? _auth;
@@ -118,15 +143,19 @@ class GroupsSync {
 
   /// Replaces local groups with what the server says this account can see.
   Future<void> pull() async {
-    if (!_live || _busy) return;
+    if (!_live) return;
+    if (_busy) {
+      _again = true;
+      return;
+    }
     _busy = true;
     try {
       final extended = await _hasExtendedSchema();
       final rows = await Backend.client
           .from('groups')
           .select('''
-            id, name, created_at${extended ? ', kind' : ''},
-            members ( id, user_id, name, email, phone, upi_id,
+            id, name, created_at${extended ? ', kind, icon' : ''},
+            members ( id, user_id, name, email, phone, upi_id${extended ? ', role' : ''},
                       account:user_id ( name, upi_id ) ),
             expenses ( id, description, amount, payer_member_id, method,
                        repeats_monthly, spent_on, deleted_at${extended ? ', recurring_id, note' : ''},
@@ -150,6 +179,10 @@ class GroupsSync {
       debugPrint('mull: pull failed ($e)');
     } finally {
       _busy = false;
+      if (_again) {
+        _again = false;
+        await pull();
+      }
     }
   }
 
@@ -181,6 +214,7 @@ class GroupsSync {
             email: m['email'] as String?,
             phone: m['phone'] as String?,
             userId: m['user_id'] as String?,
+            role: MemberRole.values.byName(m['role'] as String? ?? 'member'),
           );
         }(),
     ];
@@ -249,6 +283,7 @@ class GroupsSync {
       id: row['id'] as String,
       name: row['name'] as String? ?? '',
       kind: GroupKind.values.byName(row['kind'] as String? ?? 'group'),
+      icon: row['icon'] as String?,
       members: members,
       expenses: expenses,
       settlements: settlements,
@@ -289,6 +324,7 @@ class GroupsSync {
         'name': group.name,
         'created_by': me,
         if (extended) 'kind': group.kind.name,
+        if (extended) 'icon': group.icon,
       });
 
       // One batch, and `user_id` sent plainly — including when it is null.
@@ -322,6 +358,11 @@ class GroupsSync {
             // copy back would pin a snapshot that goes stale the day they
             // change bank.
             'upi_id': ownerOf(m) == null ? m.upiId : null,
+            // Sent on every push like everything else. Postgres decides
+            // whether it may actually move: guard_member_role lets an
+            // unchanged value through and refuses a real change from anyone
+            // who is not already an admin here.
+            if (extended) 'role': m.role.name,
           },
       ]);
 
@@ -444,6 +485,7 @@ class GroupsSync {
     if (!_live || _channel != null) return;
     _channel = Backend.client.channel('mull-groups')
       ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'expenses', callback: _bump)
+      ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'expense_shares', callback: _bump)
       ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'settlements', callback: _bump)
       ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'members', callback: _bump)
       ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'groups', callback: _bump)
@@ -453,7 +495,32 @@ class GroupsSync {
         table: 'recurring_expenses',
         callback: _bump,
       )
-      ..subscribe();
+      // A channel that fails to subscribe used to do so in complete silence,
+      // which is the worst possible shape for this bug: the app looks connected
+      // and simply never updates. Saying so, and pulling once on every
+      // (re)subscribe, means a reconnection catches up instead of resuming
+      // mid-stream and missing whatever happened while the socket was down.
+      ..subscribe((status, error) {
+        switch (status) {
+          case RealtimeSubscribeStatus.subscribed:
+            unawaited(pull());
+          case RealtimeSubscribeStatus.channelError:
+          case RealtimeSubscribeStatus.timedOut:
+          case RealtimeSubscribeStatus.closed:
+            debugPrint('mull: realtime $status ($error) — polling still covers it');
+        }
+      });
+    _startPolling();
+  }
+
+  /// The backstop under realtime. Cheap — one select against rows this account
+  /// can already see — and it only runs while the app is in the foreground,
+  /// because iOS suspends timers the moment it is not.
+  void _startPolling() {
+    _poll?.cancel();
+    _poll = Timer.periodic(_pollEvery, (_) {
+      if (_live) unawaited(pull());
+    });
   }
 
   /// Several rows usually change together — one expense is a row plus a share
@@ -463,8 +530,26 @@ class GroupsSync {
     _debounce = Timer(const Duration(milliseconds: 400), pull);
   }
 
+  /// Brings everything back up after a spell in the background.
+  ///
+  /// Both halves matter. The socket may have been torn down while suspended
+  /// and Supabase does not always notice, so the channel is rebuilt; and
+  /// whatever happened while the app was away arrived through neither the
+  /// socket nor a timer, so the pull is unconditional.
+  Future<void> resume() async {
+    if (!_live) return;
+    if (_channel == null) {
+      listen();
+    } else {
+      _startPolling();
+      await pull();
+    }
+  }
+
   Future<void> stop() async {
     _debounce?.cancel();
+    _poll?.cancel();
+    _poll = null;
     final channel = _channel;
     _channel = null;
     if (channel != null) await Backend.client.removeChannel(channel);

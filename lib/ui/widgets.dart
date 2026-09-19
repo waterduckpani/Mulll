@@ -416,12 +416,30 @@ class Footnote extends StatelessWidget {
   );
 }
 
-/// Wordmark on the left, avatar on the right. The home screen's top bar.
+/// Wordmark on the left, the three things you reach for on the right.
+///
+/// Friends used to be two taps down inside the profile sheet, which is the
+/// wrong place for the one screen that decides whether the people you split
+/// with bring their own UPI ID. It sits next to the avatar now, where a tab
+/// bar would be if this app had one.
 class BrandBar extends StatelessWidget {
-  const BrandBar({super.key, required this.initial, this.onProfile});
+  const BrandBar({
+    super.key,
+    required this.initial,
+    this.onProfile,
+    this.onFriends,
+    this.onNotices,
+    this.unread = 0,
+  });
 
   final String initial;
   final VoidCallback? onProfile;
+  final VoidCallback? onFriends;
+
+  /// Null where there is no account behind the app, and so no inbox.
+  final VoidCallback? onNotices;
+
+  final int unread;
 
   @override
   Widget build(BuildContext context) {
@@ -436,19 +454,93 @@ class BrandBar extends StatelessWidget {
             child: Text('mull', style: chillax(20, color: c.ink)),
           ),
           const Spacer(),
-          Pressable(
-            onTap: onProfile,
-            scale: .92,
+          if (onNotices != null) ...[
+            _BarButton(
+              semanticLabel: unread == 0
+                  ? 'Notifications'
+                  : '$unread unread ${unread == 1 ? 'notification' : 'notifications'}',
+              onTap: onNotices,
+              badge: unread > 0,
+              child: MullIcon(MullGlyph.bell, size: 18, color: c.ink2, strokeWidth: 1.7),
+            ),
+            const SizedBox(width: 8),
+          ],
+          if (onFriends != null) ...[
+            _BarButton(
+              semanticLabel: 'Friends',
+              onTap: onFriends,
+              child: MullIcon(MullGlyph.groups, size: 19, color: c.ink2, strokeWidth: 1.7),
+            ),
+            const SizedBox(width: 8),
+          ],
+          _BarButton(
             semanticLabel: 'Profile and settings',
-            child: Container(
+            onTap: onProfile,
+            child: Text(initial, style: ranade(14.5, color: c.ink2)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One 40px circle in the top bar.
+class _BarButton extends StatelessWidget {
+  const _BarButton({
+    required this.child,
+    required this.semanticLabel,
+    this.onTap,
+    this.badge = false,
+  });
+
+  final Widget child;
+  final String semanticLabel;
+  final VoidCallback? onTap;
+
+  /// A dot rather than a count. The number is in the sheet; out here the only
+  /// question is whether there is anything to look at, and a badge reading
+  /// "23" makes an inbox feel like a chore before it is opened.
+  final bool badge;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    return Pressable(
+      onTap: onTap,
+      scale: .92,
+      semanticLabel: semanticLabel,
+      child: SizedBox(
+        width: 40,
+        height: 40,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Container(
               width: 40,
               height: 40,
               alignment: Alignment.center,
               decoration: surfaceOf(c, Lift.low, radius: BorderRadius.circular(20)),
-              child: Text(initial, style: ranade(14.5, color: c.ink2)),
+              child: child,
             ),
-          ),
-        ],
+            if (badge)
+              Positioned(
+                top: 1,
+                right: 1,
+                child: Container(
+                  width: 9,
+                  height: 9,
+                  decoration: BoxDecoration(
+                    color: c.ink,
+                    shape: BoxShape.circle,
+                    // Ringed in the screen colour so it reads as a dot sitting
+                    // on the button rather than a smudge in its corner. No
+                    // accent colour: the design has none, here included.
+                    border: Border.all(color: c.screen, width: 2),
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

@@ -752,20 +752,71 @@ void main() {
       expect(message, contains('ananya@okhdfc'));
     });
 
-    test('nobody is nudged twice in a day', () {
+    test('nobody is nudged more than twice in a day', () {
       var now = DateTime(2026, 9, 19, 10);
       final s = MullStore.memory()..clock = () => now;
       s.completeOnboarding(name: 'Ananya');
       s.addGroup('Goa', ['Sahil']);
       youPaidFor(s, s.groups.single, 1000);
 
-      final first = s.owedToYou.single;
-      expect(s.canNudge(first), isTrue);
-      s.markNudged(first);
-      expect(s.canNudge(s.owedToYou.single), isFalse);
+      expect(s.nudgesLeft(s.owedToYou.single), 2);
+      s.markNudged(s.owedToYou.single);
+      expect(s.nudgesLeft(s.owedToYou.single), 1, reason: 'one is a favour, two is fair');
+      expect(s.canNudge(s.owedToYou.single), isTrue);
 
-      now = DateTime(2026, 9, 20, 11);
-      expect(s.canNudge(s.owedToYou.single), isTrue, reason: 'a day later is fair');
+      now = DateTime(2026, 9, 19, 14);
+      s.markNudged(s.owedToYou.single);
+      expect(s.canNudge(s.owedToYou.single), isFalse, reason: 'the third is nagging');
+
+      // A rolling window, not a calendar one: midnight is not a reset anybody
+      // experiences, and two at 11pm plus two at 12:05am is four in ten
+      // minutes.
+      now = DateTime(2026, 9, 20, 9, 59);
+      expect(s.canNudge(s.owedToYou.single), isFalse, reason: 'still inside 24 hours');
+
+      // Each nudge ages out on its own, so the allowance comes back in the
+      // order it was spent rather than all at once at some reset hour.
+      now = DateTime(2026, 9, 20, 10, 1);
+      expect(s.nudgesLeft(s.owedToYou.single), 1, reason: 'the 10am one has aged out');
+
+      now = DateTime(2026, 9, 20, 14, 1);
+      expect(s.nudgesLeft(s.owedToYou.single), 2, reason: 'and now the 2pm one has too');
+    });
+
+    test('the allowance is per person, not per group', () {
+      var now = DateTime(2026, 9, 19, 10);
+      final s = MullStore.memory()..clock = () => now;
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Goa', ['Sahil']);
+      s.addGroup('Flat', ['Sahil']);
+      for (final g in s.groups) {
+        youPaidFor(s, g, 1000);
+      }
+
+      // Sahil owes across two ledgers but is one person. Spending the
+      // allowance has to follow him, or three dinners together would mean six
+      // reminders a day.
+      final owing = s.owedToYou.single;
+      expect(owing.groups, hasLength(2));
+      s.markNudged(owing);
+      now = DateTime(2026, 9, 19, 14);
+      s.markNudged(s.owedToYou.single);
+      expect(s.canNudge(s.owedToYou.single), isFalse);
+    });
+
+    test("a nudge the server refused does not stay offered", () {
+      final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19, 10);
+      s.completeOnboarding(name: 'Ananya');
+      s.addGroup('Goa', ['Sahil']);
+      youPaidFor(s, s.groups.single, 1000);
+
+      // The count that decides is the server's — a reminder sent from another
+      // phone never touched this one's copy. When it says the allowance is
+      // gone, the button has to agree rather than keep firing a call that will
+      // keep being refused.
+      s.spendNudges(s.owedToYou.single);
+      expect(s.canNudge(s.owedToYou.single), isFalse);
+      expect(s.nudgesLeft(s.owedToYou.single), 0);
     });
 
     test('people you owe are not on the list', () {
@@ -1020,6 +1071,215 @@ void main() {
     test('leaves the note out rather than sending an empty one', () {
       final uri = upiPaymentUri(upiId: 'a@b', name: 'A', amount: 10, note: '   ');
       expect(uri.queryParameters.containsKey('tn'), isFalse);
+    });
+  });
+
+  group('who runs a group', () {
+    MullStore signedIn() => MullStore.memory()..completeOnboarding(name: 'Ananya');
+
+    test('whoever starts it runs it, and nobody else does', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', ['Sahil']);
+      expect(g.you!.isAdmin, isTrue);
+      expect(g.memberById(g.members[1].id)!.isAdmin, isFalse);
+      expect(g.youAreAdmin, isTrue);
+      expect(g.admins, hasLength(1));
+    });
+
+    test('a one-to-one ledger has no hierarchy in it', () {
+      final s = signedIn();
+      final g = s.directWith(name: 'Ritu', userId: newId());
+      expect(g.members.every((m) => m.isAdmin), isTrue,
+          reason: 'it belongs to both of you, so either can rename or delete it');
+      expect(g.youAreAdmin, isTrue);
+    });
+
+    test('the last admin cannot step down', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', []);
+      final sahil = s.addFriendAsMember(g, userId: newId(), name: 'Sahil')!;
+
+      expect(s.setAdmin(g, g.you!, false), isFalse, reason: 'that group would be unrunnable');
+      expect(g.you!.isAdmin, isTrue);
+
+      expect(s.setAdmin(g, sahil, true), isTrue);
+      expect(s.setAdmin(g, g.you!, false), isTrue, reason: 'there is someone else now');
+      expect(g.youAreAdmin, isFalse);
+    });
+
+    test('a member cannot remove people, and an admin cannot remove history', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', ['Sahil', 'Dev']);
+      final sahil = g.members.firstWhere((m) => m.name == 'Sahil');
+      final dev = g.members.firstWhere((m) => m.name == 'Dev');
+
+      expect(s.canRemoveMember(g, dev), isTrue);
+
+      // Sahil paid for something, so the ledger depends on him. That refusal
+      // is arithmetic, not authority, and outranks being an admin.
+      s.addExpense(
+        g,
+        description: 'Rent',
+        amount: 900,
+        payerId: sahil.id,
+        shares: splitEqually(900, g.members.map((m) => m.id).toList()),
+      );
+      expect(s.canRemoveMember(g, sahil), isFalse);
+      expect(s.whyMemberStays(g, sahil), contains('owe a share'));
+
+      // Dev was in that split too, so the arithmetic refusal now covers him
+      // as well — it outranks authority either way. Test the other refusal
+      // against someone the ledger has never touched.
+      expect(s.whyMemberStays(g, dev), contains('owe a share'));
+      final bhavya = s.addFriendAsMember(g, userId: newId(), name: 'Bhavya')!;
+      expect(s.canRemoveMember(g, bhavya), isTrue);
+
+      // Hand the group over and the authority goes with it.
+      s
+        ..setAdmin(g, bhavya, true)
+        ..setAdmin(g, g.you!, false);
+      expect(s.canRemoveMember(g, bhavya), isFalse);
+      expect(s.whyMemberStays(g, bhavya), contains('Only an admin'));
+    });
+
+    test('leaving is yours to do, but not at the ledger\'s expense', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', []);
+      final sahil = s.addFriendAsMember(g, userId: newId(), name: 'Sahil')!;
+
+      // Sole admin of a group with someone else in it.
+      expect(s.whyYouCannotLeave(g), contains('only admin'));
+
+      s.setAdmin(g, sahil, true);
+      expect(s.whyYouCannotLeave(g), isNull);
+
+      s.addExpense(
+        g,
+        description: 'Wifi',
+        amount: 800,
+        payerId: g.you!.id,
+        shares: splitEqually(800, [g.you!.id, sahil.id]),
+      );
+      expect(s.whyYouCannotLeave(g), contains('Settle up first'));
+      expect(s.leaveGroup(g), isFalse);
+      expect(s.groups, hasLength(1));
+    });
+
+    test('an icon is an admin\'s to set', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', []);
+      s.setGroupIcon(g, 'home');
+      expect(g.icon, 'home');
+
+      final sahil = s.addFriendAsMember(g, userId: newId(), name: 'Sahil')!;
+      s
+        ..setAdmin(g, sahil, true)
+        ..setAdmin(g, g.you!, false)
+        ..setGroupIcon(g, 'plane');
+      expect(g.icon, 'home', reason: 'the server refuses this too, so the app should not offer it');
+    });
+
+    test('roles and icons survive a round trip through the file', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', ['Kabir']);
+      s.setGroupIcon(g, 'bolt');
+
+      final reopened = MullStore.memory()..debugRestore(s.toJson());
+      final back = reopened.groups.single;
+      expect(back.icon, 'bolt');
+      expect(back.you!.isAdmin, isTrue);
+      expect(back.members.firstWhere((m) => m.name == 'Kabir').isAdmin, isFalse);
+    });
+  });
+
+  group('who gets told', () {
+    /// Collects what the app would have sent, instead of sending it.
+    (MullStore, List<Notice>) listening() {
+      final sent = <Notice>[];
+      final s = MullStore.memory()
+        ..completeOnboarding(name: 'Ananya')
+        ..onNotice = sent.add;
+      return (s, sent);
+    }
+
+    test('an expense reaches the split, not the group', () {
+      final (s, sent) = listening();
+      final g = s.addGroup('Flat', []);
+      final sahil = s.addFriendAsMember(g, userId: 'u-sahil', name: 'Sahil')!;
+      final dev = s.addFriendAsMember(g, userId: 'u-dev', name: 'Dev')!;
+      s.addFriendAsMember(g, userId: 'u-bhavya', name: 'Bhavya');
+      sent.clear();
+
+      s.addExpense(
+        g,
+        description: 'Chai',
+        amount: 60,
+        payerId: sahil.id,
+        shares: splitEqually(60, [sahil.id, dev.id]),
+      );
+
+      final notice = sent.single;
+      expect(notice.kind, NoticeKind.expenseAdded);
+      expect(notice.to, unorderedEquals(['u-sahil', 'u-dev']),
+          reason: 'Bhavya is in the group and not in the split');
+      expect(notice.title, contains('Sahil'));
+    });
+
+    test('a seat with nobody behind it is not told anything', () {
+      final (s, sent) = listening();
+      final g = s.addGroup('Trip', ['Kabir']);
+      sent.clear();
+      final kabir = g.members.firstWhere((m) => m.name == 'Kabir');
+
+      s.addExpense(
+        g,
+        description: 'Cab',
+        amount: 400,
+        payerId: g.you!.id,
+        shares: splitEqually(400, [g.you!.id, kabir.id]),
+      );
+      expect(sent, isEmpty, reason: 'a placeholder has no inbox to reach');
+    });
+
+    test('settling reaches the other end of the payment and stops', () {
+      final (s, sent) = listening();
+      final g = s.addGroup('Flat', []);
+      final sahil = s.addFriendAsMember(g, userId: 'u-sahil', name: 'Sahil')!;
+      s.addFriendAsMember(g, userId: 'u-dev', name: 'Dev');
+      sent.clear();
+
+      s.settleUp(g, fromId: g.you!.id, toId: sahil.id, amount: 500);
+      expect(sent.single.to, ['u-sahil']);
+      expect(sent.single.kind, NoticeKind.settlementClaimed);
+
+      // Confirming and disputing are the payee's calls, so the claim being
+      // answered is one Sahil made on his phone and this one pulled down.
+      final his = Settlement(fromId: sahil.id, toId: g.you!.id, amount: 500);
+      g.settlements.add(his);
+
+      sent.clear();
+      s.confirmSettlement(g, his);
+      expect(sent.single.to, ['u-sahil']);
+      expect(sent.single.kind, NoticeKind.settlementConfirmed);
+
+      sent.clear();
+      s.disputeSettlement(g, his);
+      expect(sent.single.kind, NoticeKind.settlementDisputed);
+      expect(sent.single.to, ['u-sahil'],
+          reason: 'a disputed payment is between the two of them');
+    });
+
+    test('a notice never says "You" to somebody else', () {
+      final (s, sent) = listening();
+      final g = s.addGroup('Flat', []);
+      final sahil = s.addFriendAsMember(g, userId: 'u-sahil', name: 'Sahil')!;
+      sent.clear();
+
+      // Your own seat reads as "You" everywhere on screen, which is exactly
+      // wrong in a sentence being delivered to someone else's phone.
+      s.settleUp(g, fromId: g.you!.id, toId: sahil.id, amount: 500);
+      expect(sent.single.title, startsWith('Ananya'));
+      expect(sent.single.title, isNot(contains('You ')));
     });
   });
 }

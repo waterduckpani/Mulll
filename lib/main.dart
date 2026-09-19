@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show AuthState;
 
+import 'data/remote/auth_service.dart';
 import 'data/remote/backend.dart';
 import 'data/remote/groups_sync.dart';
+import 'data/notices.dart';
 import 'data/store.dart';
 import 'screens/onboarding_flow.dart';
 import 'screens/app_shell.dart';
@@ -26,19 +28,23 @@ Future<void> main() async {
   final sync = GroupsSync(store)
     ..attachTo(store)
     ..start();
+  final notices = NoticesInbox()
+    ..attachTo(store)
+    ..start();
 
-  runApp(MullApp(store: store, sync: sync));
+  runApp(MullApp(store: store, sync: sync, notices: notices));
 }
 
 class MullApp extends StatelessWidget {
-  const MullApp({super.key, required this.store, this.sync});
+  const MullApp({super.key, required this.store, this.sync, this.notices});
 
   final MullStore store;
   final GroupsSync? sync;
+  final NoticesInbox? notices;
 
   @override
   Widget build(BuildContext context) {
-    return StoreScope(
+    final app = StoreScope(
       store: store,
       child: ListenableBuilder(
         listenable: store,
@@ -64,6 +70,11 @@ class MullApp extends StatelessWidget {
         ),
       ),
     );
+
+    // Outside StoreScope rather than inside it: the inbox has to survive the
+    // theme rebuilding, and nothing in it depends on the ledger.
+    final inbox = notices;
+    return inbox == null ? app : NoticesScope(inbox: inbox, child: app);
   }
 }
 
@@ -97,8 +108,27 @@ class _RootState extends State<_Root> {
       // straight back to the door.
       _auth = Backend.client.auth.onAuthStateChange.listen((_) {
         if (mounted) setState(() {});
+        unawaited(_adoptAccount());
       });
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) => unawaited(_adoptAccount()));
+  }
+
+  /// Finishes onboarding for someone the account already knows.
+  ///
+  /// The gate asks two questions — is there a session, and has this install
+  /// been set up — and only the first of them is about the person. A restored
+  /// session sitting next to an empty `mull.json` is a real state: a reinstall
+  /// keeps the keychain, and "start over" clears the file but not the session.
+  /// Without this, both of those open on "what should we call you?" for
+  /// somebody who answered that months ago.
+  Future<void> _adoptAccount() async {
+    if (!mounted || !Backend.isSignedIn) return;
+    final store = StoreScope.read(context);
+    if (store.profile.onboarded) return;
+    final account = await AuthService.fetchProfile();
+    if (!mounted || account == null || account.name.trim().isEmpty) return;
+    store.adoptAccount(name: account.name, upiId: account.upiId);
   }
 
   @override

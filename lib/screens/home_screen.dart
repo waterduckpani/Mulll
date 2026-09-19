@@ -5,7 +5,9 @@ import '../core/dates.dart';
 import '../core/money.dart';
 import '../core/upi.dart';
 import '../data/models.dart';
+import '../data/remote/notices_service.dart';
 import '../data/store.dart';
+import '../ui/group_icons.dart';
 import '../ui/icons.dart';
 import '../ui/page.dart';
 import '../ui/sheet.dart';
@@ -14,6 +16,7 @@ import '../ui/widgets.dart';
 import 'groups/create_group_flow.dart';
 import 'groups/group_detail_screen.dart';
 import 'groups/group_sheets.dart';
+import 'groups/icon_picker.dart';
 import 'groups/recurring_sheets.dart';
 
 /// Mull, all of it.
@@ -42,6 +45,20 @@ class HomeScreen extends StatelessWidget {
       if (group != null && context.mounted) open(group);
     }
 
+    // How much room a ledger row gets.
+    //
+    // One group should not look like a list of one. A person with a single
+    // flat opens Mull to a screen that is mostly empty, and a 68px row sitting
+    // under a 76pt number reads as an app waiting for something to happen —
+    // so with one or two ledgers the row becomes a card with the icon, the
+    // people and the balance in it. The moment there are several, the page has
+    // a real job to do and the rows tighten up to let you scan them.
+    final density = switch (groups.length + people.length) {
+      1 => _Density.roomy,
+      2 || 3 => _Density.medium,
+      _ => _Density.compact,
+    };
+
     // Exactly one focal object per screen. The first thing waiting on an
     // answer takes it; everything below is an ordinary card.
     var focalTaken = false;
@@ -53,6 +70,7 @@ class HomeScreen extends StatelessWidget {
 
     return MullPage(
       glow: const GlowSpec(size: 450, top: -170, right: -150),
+      onRefresh: store.pullNow,
       bottom: PillButton(
         'Start a group',
         glyph: MullGlyph.plus,
@@ -84,10 +102,16 @@ class HomeScreen extends StatelessWidget {
                 const Eyebrow('Groups', padding: EdgeInsets.fromLTRB(Gutter.text, 40, Gutter.text, 0)),
                 const SizedBox(height: 14),
                 Stacked(
+                  gap: density == _Density.roomy ? 10 : 8,
                   padding: const EdgeInsets.symmetric(horizontal: Gutter.card),
                   children: [
                     for (final g in groups)
-                      _LedgerRow(key: ValueKey(g.id), group: g, onTap: () => open(g)),
+                      _LedgerRow(
+                        key: ValueKey(g.id),
+                        group: g,
+                        density: density,
+                        onTap: () => open(g),
+                      ),
                   ],
                 ),
               ],
@@ -98,7 +122,16 @@ class HomeScreen extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: Gutter.card),
                   children: [
                     for (final g in people)
-                      _LedgerRow(key: ValueKey(g.id), group: g, onTap: () => open(g)),
+                      // People stay compact whatever the groups are doing.
+                      // A one-to-one ledger has a name and a number and
+                      // nothing else to show, so the roomy card would just be
+                      // a compact one with air around it.
+                      _LedgerRow(
+                        key: ValueKey(g.id),
+                        group: g,
+                        density: _Density.compact,
+                        onTap: () => open(g),
+                      ),
                   ],
                 ),
               ],
@@ -196,7 +229,7 @@ class _EmptyHome extends StatelessWidget {
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    for (final suggestion in const ['Flat', 'Goa trip', 'Dinner', 'Rent'])
+                    for (final suggestion in const ['Flat', 'Trip', 'Dinner', 'Rent'])
                       ChipButton(suggestion, onTap: () => onStart(name: suggestion)),
                   ],
                 ),
@@ -348,7 +381,7 @@ Future<void> showHowItWorks(BuildContext context) => showMullSheet(
               beat(
                 '01',
                 'Add what people pay',
-                'Whoever paid, and who it was for. Split it evenly or set exact '
+                'Whoever paid, and what it was for. Split it evenly or set exact '
                     'amounts. The balance updates as you go.',
               ),
               beat(
@@ -493,16 +526,35 @@ class _DueCard extends StatelessWidget {
   }
 }
 
-/// One line in the GROUPS or PEOPLE list.
+/// How much of the screen a ledger row is allowed to take.
+enum _Density {
+  /// One ledger. The number goes big and the card carries the detail.
+  roomy,
+
+  /// Two or three. The icon and the people stay, the number comes back down.
+  medium,
+
+  /// Four or more. A line you scan, which is all a list this long can be.
+  compact,
+}
+
+/// One entry in the GROUPS or PEOPLE list.
 class _LedgerRow extends StatelessWidget {
-  const _LedgerRow({super.key, required this.group, required this.onTap});
+  const _LedgerRow({
+    super.key,
+    required this.group,
+    required this.onTap,
+    this.density = _Density.compact,
+  });
 
   final Group group;
   final VoidCallback onTap;
+  final _Density density;
 
   @override
   Widget build(BuildContext context) {
     final c = context.c;
+    final store = context.store;
     final balance = group.yourBalance;
     final settled = balance == 0;
 
@@ -515,7 +567,11 @@ class _LedgerRow extends StatelessWidget {
     // A settled ledger is still worth seeing and not worth reading. It sinks
     // rather than disappearing, so the list stays a record of who you split
     // with instead of emptying out every time everyone pays up.
-    return Semantics(
+    final lift = settled ? Lift.flat : Lift.card;
+
+    // One label for the whole row. Read out piece by piece it becomes "Goa
+    // trip, you owe, two thousand four hundred" spread over four stops.
+    Widget wrap(Widget child, {required double radius, required EdgeInsets padding}) => Semantics(
       button: true,
       label: amount == null
           ? '${group.title}, settled up'
@@ -528,38 +584,102 @@ class _LedgerRow extends StatelessWidget {
           child: Opacity(
             opacity: settled ? .55 : 1,
             child: Container(
-              padding: const EdgeInsets.fromLTRB(24, 21, 24, 21),
-              decoration: surfaceOf(
-                c,
-                settled ? Lift.flat : Lift.card,
-                radius: BorderRadius.circular(26),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  if (group.isDirect) ...[
-                    MullIcon(MullGlyph.person, size: 15, color: c.ink3, strokeWidth: 1.6),
-                    const SizedBox(width: 10),
-                  ],
-                  Expanded(
-                    child: Text(
-                      group.title,
-                      style: MullType.cardTitle(settled ? c.ink2 : c.ink, size: 18),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(label, style: MullType.caption(c.ink3)),
-                  if (amount != null) ...[
-                    const SizedBox(width: 10),
-                    AnimatedAmount(amount, style: MullType.cardAmount(c.ink)),
-                  ],
-                ],
-              ),
+              padding: padding,
+              decoration: surfaceOf(c, lift, radius: BorderRadius.circular(radius)),
+              child: child,
             ),
           ),
         ),
+      ),
+    );
+
+    if (density == _Density.compact) {
+      return wrap(
+        radius: 26,
+        padding: const EdgeInsets.fromLTRB(24, 21, 24, 21),
+        Row(
+          children: [
+            if (group.isDirect) ...[
+              MullIcon(MullGlyph.person, size: 15, color: c.ink3, strokeWidth: 1.6),
+              const SizedBox(width: 10),
+            ] else if (group.icon != null) ...[
+              Icon(groupGlyph(group.icon), size: 16, color: c.ink3),
+              const SizedBox(width: 10),
+            ],
+            Expanded(
+              child: Text(
+                group.title,
+                style: MullType.cardTitle(settled ? c.ink2 : c.ink, size: 18),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(label, style: MullType.caption(c.ink3)),
+            if (amount != null) ...[
+              const SizedBox(width: 10),
+              AnimatedAmount(amount, style: MullType.cardAmount(c.ink)),
+            ],
+          ],
+        ),
+      );
+    }
+
+    final roomy = density == _Density.roomy;
+    final others = group.members.where((m) => !m.isYou).toList();
+    final roster = others.isEmpty
+        ? 'Nobody else in here yet'
+        : others.length <= 3
+        ? others.map(store.shortName).join(', ')
+        : '${others.take(2).map(store.shortName).join(', ')} and ${others.length - 2} more';
+
+    return wrap(
+      radius: roomy ? 32 : 28,
+      padding: EdgeInsets.fromLTRB(24, roomy ? 24 : 20, 24, roomy ? 26 : 22),
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              GroupBadge(group: group, size: roomy ? 44 : 38, glyphSize: roomy ? 21 : 18, quiet: true),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      group.title,
+                      style: MullType.cardTitle(settled ? c.ink2 : c.ink, size: roomy ? 21 : 19),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      roster,
+                      style: MullType.caption(c.ink3, size: 11.5),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          SizedBox(height: roomy ? 24 : 16),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(child: Text(label, style: MullType.caption(c.ink3))),
+              if (amount != null)
+                AnimatedAmount(
+                  amount,
+                  style: roomy
+                      ? excon(38, tracking: -.04, height: .95, color: c.ink)
+                      : MullType.cardAmount(c.ink, size: 24),
+                ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -747,21 +867,62 @@ class _OwedRow extends StatelessWidget {
   }
 }
 
-/// Hands the reminder to WhatsApp, already written.
+/// Chases someone inside Mull.
 ///
-/// Mull does not send anything itself, and that is on purpose: a message that
-/// arrives from an app reads as a collections notice, while the same words from
-/// you read as a person asking. It also means nobody has to have Mull.
+/// This used to open WhatsApp with the message pre-written, which was the one
+/// feature guaranteeing the ledger stayed in the chat — the whole point of the
+/// app is that it does not. So a reminder is a notification now, to their copy
+/// of Mull, from the person they actually owe.
+///
+/// Someone who is not on Mull has no inbox to send to, and for them WhatsApp
+/// is still the honest answer rather than a dead button.
 Future<void> nudge(BuildContext context, Owing owing) async {
   final store = context.readStore;
   final message = store.nudgeMessage(owing);
   HapticFeedback.mediumImpact();
-  final sent = await shareOnWhatsApp(message, phone: owing.member.phone);
+
+  final userId = owing.member.userId;
+  if (userId == null) {
+    final sent = await shareOnWhatsApp(message, phone: owing.member.phone);
+    if (!context.mounted) return;
+    if (sent) {
+      store.markNudged(owing);
+      Toast.show(context, '${store.shortName(owing.member)} is not on Mull — sent on WhatsApp');
+    } else {
+      Toast.show(context, "Couldn't open WhatsApp");
+    }
+    return;
+  }
+
+  final outcome = await NoticesService.remind(
+    toUserId: userId,
+    groupId: owing.groups.length == 1 ? owing.groups.first.id : null,
+    title: '${store.profile.name.trim().split(' ').first} is waiting on ${inr(owing.amount)}',
+    body: owing.groups.length == 1
+        ? owing.groups.first.title
+        : 'Across ${owing.groups.length} ledgers',
+    amount: owing.amount,
+  );
   if (!context.mounted) return;
-  if (sent) {
-    store.markNudged(owing);
-    Toast.show(context, 'Reminder ready in WhatsApp');
-  } else {
-    Toast.show(context, "Couldn't open WhatsApp");
+
+  switch (outcome) {
+    case ReminderOutcome.sent:
+      // Only counted locally once the server took it, so a failed send does
+      // not spend one of the two.
+      store.markNudged(owing);
+      final left = store.nudgesLeft(owing);
+      Toast.show(
+        context,
+        left > 0
+            ? 'Nudged ${store.shortName(owing.member)} · one more today'
+            : 'Nudged ${store.shortName(owing.member)}',
+      );
+    case ReminderOutcome.outOfTurns:
+      // Make the local copy agree with the server rather than arguing with it.
+      // The count that matters is the one that was just enforced.
+      store.spendNudges(owing);
+      Toast.show(context, "That's both of today's nudges. Try again tomorrow.");
+    case ReminderOutcome.failed:
+      Toast.show(context, "Couldn't send that. Check your connection.");
   }
 }

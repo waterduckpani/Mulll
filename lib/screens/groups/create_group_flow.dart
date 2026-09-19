@@ -4,12 +4,14 @@ import 'package:flutter/services.dart';
 import '../../data/models.dart';
 import '../../data/remote/friends_service.dart';
 import '../../data/store.dart';
+import '../../ui/group_icons.dart';
 import '../../ui/icons.dart';
 import '../../ui/page.dart';
 import '../../ui/sheet.dart';
 import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
 import '../friends_sheet.dart';
+import 'icon_picker.dart';
 
 /// Starting a group, in two questions.
 ///
@@ -71,6 +73,12 @@ class _CreateGroupFlowState extends State<CreateGroupFlow> {
 
   /// Names typed by hand, for anyone not on Mull.
   final _typed = <String>[];
+
+  /// The mark the group carries in a list. Offered here rather than buried in
+  /// settings because the moment you are naming a thing is the moment you know
+  /// what it is — and a list of four identically-shaped rows is the problem
+  /// this solves.
+  String? _icon;
 
   int _step = 0;
 
@@ -176,6 +184,7 @@ class _CreateGroupFlowState extends State<CreateGroupFlow> {
       group = store.addGroup(
         _title,
         _typed,
+        icon: _icon ?? _suggestedIcon,
         friends: [
           for (final f in _pickedFriends)
             Member(name: f.label, userId: f.userId, email: f.email, upiId: f.upiId),
@@ -187,6 +196,22 @@ class _CreateGroupFlowState extends State<CreateGroupFlow> {
   }
 
   bool get _canCreate => _direct ? (_picked.length + _typed.length) == 1 : true;
+
+  /// What the name itself implies, when nobody has chosen.
+  ///
+  /// Typing "Goa trip" and getting a plane without asking is the whole point:
+  /// almost nobody would go looking for an icon picker, and almost everybody
+  /// benefits from their groups being told apart at a glance.
+  String? get _suggestedIcon {
+    final name = _title.trim();
+    if (name.isEmpty) return null;
+    for (final word in name.toLowerCase().split(RegExp(r'[^a-z0-9]+'))) {
+      if (word.length < 3) continue;
+      final match = searchGroupIcons(word);
+      if (match.isNotEmpty) return match.first.key;
+    }
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -227,12 +252,36 @@ class _CreateGroupFlowState extends State<CreateGroupFlow> {
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(Gutter.text, 40, Gutter.text, 0),
-          child: BigField(
-            controller: _name,
-            focusNode: _nameFocus,
-            hint: 'Goa trip',
-            textInputAction: TextInputAction.done,
-            onSubmitted: (_) => _title.isEmpty ? null : _next(),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Pre-filled from the name, so most people never touch it and
+              // still end up with four groups they can tell apart. Tapping it
+              // opens the search.
+              Padding(
+                padding: const EdgeInsets.only(top: 4, right: 16),
+                child: IconWell(
+                  iconKey: _icon ?? _suggestedIcon,
+                  size: 46,
+                  glyphSize: 22,
+                  onTap: () async {
+                    FocusScope.of(context).unfocus();
+                    final picked = await showIconPicker(context, current: _icon ?? _suggestedIcon);
+                    if (picked == null || !mounted) return;
+                    setState(() => _icon = picked.isEmpty ? null : picked);
+                  },
+                ),
+              ),
+              Expanded(
+                child: BigField(
+                  controller: _name,
+                  focusNode: _nameFocus,
+                  hint: 'Trip to Goa',
+                  textInputAction: TextInputAction.done,
+                  onSubmitted: (_) => _title.isEmpty ? null : _next(),
+                ),
+              ),
+            ],
           ),
         ),
         Padding(

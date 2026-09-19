@@ -363,6 +363,174 @@ class Toast {
   }
 }
 
+// --------------------------------------------------------------------- notice
+
+/// Something somebody else did, arriving while you are looking at the screen.
+///
+/// Drops from the top rather than rising from the bottom, and that is the whole
+/// distinction: the bottom of the screen is where Mull confirms what *you* just
+/// did, and the top is where the world arrives. Sharing one shape for both
+/// would make another person's expense look like your own action succeeding.
+class NoticeBanner {
+  static OverlayEntry? _entry;
+  static Timer? _timer;
+
+  static void show(
+    BuildContext context,
+    String title, {
+    String body = '',
+    VoidCallback? onTap,
+  }) {
+    hide();
+    final overlay = Overlay.of(context, rootOverlay: true);
+    final key = GlobalKey<_NoticeViewState>();
+    _entry = OverlayEntry(
+      builder: (_) => _NoticeView(
+        key: key,
+        title: title,
+        body: body,
+        onTap: onTap == null
+            ? null
+            : () {
+                hide();
+                onTap();
+              },
+        onDismiss: hide,
+      ),
+    );
+    overlay.insert(_entry!);
+    _timer = Timer(const Duration(milliseconds: 5200), () async {
+      await key.currentState?.dismiss();
+      hide();
+    });
+  }
+
+  static void hide() {
+    _timer?.cancel();
+    _entry?.remove();
+    _entry = null;
+  }
+}
+
+class _NoticeView extends StatefulWidget {
+  const _NoticeView({
+    super.key,
+    required this.title,
+    required this.body,
+    this.onTap,
+    required this.onDismiss,
+  });
+
+  final String title;
+  final String body;
+  final VoidCallback? onTap;
+  final VoidCallback onDismiss;
+
+  @override
+  State<_NoticeView> createState() => _NoticeViewState();
+}
+
+class _NoticeViewState extends State<_NoticeView> with SingleTickerProviderStateMixin {
+  late final AnimationController _c =
+      AnimationController(vsync: this, duration: const Duration(milliseconds: 420))..forward();
+
+  Future<void> dismiss() => _c.reverse();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final topSafe = MediaQuery.paddingOf(context).top;
+    final curve = CurvedAnimation(parent: _c, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+
+    return Positioned(
+      left: 16,
+      right: 16,
+      top: (topSafe > 0 ? topSafe : 18) + 6,
+      child: FadeTransition(
+        opacity: curve,
+        child: SlideTransition(
+          position: Tween(begin: const Offset(0, -.5), end: Offset.zero).animate(curve),
+          child: Material(
+            type: MaterialType.transparency,
+            child: GestureDetector(
+              // Flick it away. A notification you cannot get rid of is worse
+              // than one you did not get.
+              onVerticalDragEnd: (d) {
+                if ((d.primaryVelocity ?? 0) < -200) widget.onDismiss();
+              },
+              child: Pressable(
+                onTap: widget.onTap,
+                scale: .98,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(26),
+                    boxShadow: [
+                      BoxShadow(color: c.shadowFocal, blurRadius: 44, offset: const Offset(0, 14)),
+                    ],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(26),
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(20, 15, 18, 16),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(26),
+                        gradient: LinearGradient(
+                          begin: const Alignment(-.07, -1),
+                          end: const Alignment(.07, 1),
+                          colors: [c.sheetTop, c.sheetBottom],
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          MullIcon(MullGlyph.bell, size: 16, color: c.ink2, strokeWidth: 1.7),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  widget.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: ranade(14.5, height: 1.3, color: c.ink),
+                                ),
+                                if (widget.body.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    widget.body,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: ranade(11.5, height: 1.4, color: c.ink3),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                          if (widget.onTap != null) ...[
+                            const SizedBox(width: 10),
+                            MullIcon(MullGlyph.chevronRight, size: 13, color: c.ink3, strokeWidth: 1.8),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _ToastView extends StatefulWidget {
   const _ToastView({super.key, required this.message, this.action, required this.onAction});
 

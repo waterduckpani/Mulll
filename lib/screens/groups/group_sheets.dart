@@ -7,89 +7,15 @@ import '../../core/split.dart';
 import '../../core/upi.dart';
 import '../../core/upi_receipt.dart';
 import '../../data/models.dart';
+import '../../data/remote/notices_service.dart';
 import '../../data/store.dart';
 import '../../ui/icons.dart';
 import '../../ui/sheet.dart';
 import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
-import '../friends_sheet.dart';
+import 'icon_picker.dart';
 import 'recurring_sheets.dart';
 import 'split_editor.dart';
-
-/// Inline "add a name" input that turns each entry into a seat.
-class _PeopleInput extends StatefulWidget {
-  const _PeopleInput({required this.onAdd});
-
-  final ValueChanged<String> onAdd;
-
-  static const hint = 'Add a name';
-
-  @override
-  State<_PeopleInput> createState() => _PeopleInputState();
-}
-
-class _PeopleInputState extends State<_PeopleInput> {
-  final _ctrl = TextEditingController();
-  final _focus = FocusNode();
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    _focus.dispose();
-    super.dispose();
-  }
-
-  void _submit() {
-    final names = _ctrl.text.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty);
-    for (final n in names) {
-      widget.onAdd(n);
-    }
-    _ctrl.clear();
-    _focus.requestFocus();
-    setState(() {});
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    return Container(
-      padding: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: c.inputLine)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _ctrl,
-              focusNode: _focus,
-              style: ranade(16, color: c.ink),
-              textCapitalization: TextCapitalization.words,
-              textInputAction: TextInputAction.done,
-              keyboardAppearance: c.isDark ? Brightness.dark : Brightness.light,
-              onChanged: (_) => setState(() {}),
-              onSubmitted: (_) => _submit(),
-              decoration: InputDecoration.collapsed(
-                hintText: _PeopleInput.hint,
-                hintStyle: ranade(16, color: c.ink3.withValues(alpha: .6)),
-              ),
-            ),
-          ),
-          AnimatedOpacity(
-            opacity: _ctrl.text.trim().isEmpty ? .3 : 1,
-            duration: const Duration(milliseconds: 150),
-            child: CircleButton(
-              filled: false,
-              semanticLabel: 'Add person',
-              onTap: _ctrl.text.trim().isEmpty ? null : _submit,
-              child: MullIcon(MullGlyph.plus, size: 18, color: c.ink, strokeWidth: 1.8),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 /// The group creation flow lives in `create_group_flow.dart` now: naming a
 /// thing and deciding who is in it are two questions, and a sheet that asks
@@ -415,16 +341,42 @@ class _SettleSheet extends StatelessWidget {
       if (context.mounted) await _confirmPaid(context, group, transfer);
     }
 
+    /// Chases them inside Mull, not in a chat app. Twice a day, counted on the
+    /// server — the cap is the feature here as much as the reminder is.
     Future<void> remind() async {
-      final message = [
-        'Hey ${store.shortName(from)}, ${inr(transfer.amount)} for ${group.title} '
-            'when you get a chance.',
-        if (store.profile.upiId != null) 'My UPI is ${store.profile.upiId}.',
-      ].join(' ');
       Navigator.of(context).pop();
-      final sent = await shareOnWhatsApp(message, phone: from.phone);
+      final userId = from.userId;
+
+      if (userId == null) {
+        // No account behind that seat, so there is no inbox to reach. WhatsApp
+        // is the honest fallback rather than a button that does nothing.
+        final message = [
+          'Hey ${store.shortName(from)}, ${inr(transfer.amount)} for ${group.title} '
+              'when you get a chance.',
+          if (store.profile.upiId != null) 'My UPI is ${store.profile.upiId}.',
+        ].join(' ');
+        final sent = await shareOnWhatsApp(message, phone: from.phone);
+        if (!context.mounted) return;
+        Toast.show(
+          context,
+          sent ? '${store.shortName(from)} is not on Mull — sent on WhatsApp' : "Couldn't open WhatsApp",
+        );
+        return;
+      }
+
+      final outcome = await NoticesService.remind(
+        toUserId: userId,
+        groupId: group.id,
+        title: '${store.profile.name.trim().split(' ').first} is waiting on ${inr(transfer.amount)}',
+        body: group.title,
+        amount: transfer.amount,
+      );
       if (!context.mounted) return;
-      Toast.show(context, sent ? 'Reminder ready in WhatsApp' : "Couldn't open WhatsApp");
+      Toast.show(context, switch (outcome) {
+        ReminderOutcome.sent => 'Nudged ${store.shortName(from)}',
+        ReminderOutcome.outOfTurns => "That's both of today's nudges. Try again tomorrow.",
+        ReminderOutcome.failed => "Couldn't send that. Check your connection.",
+      });
     }
 
     return Padding(
@@ -790,9 +742,39 @@ class _MemberSheetState extends State<_MemberSheet> {
 
 // ----------------------------------------------------------------- settings
 
-/// Resolves to 'deleted' when the group was removed, or 'add-recurring' when
-/// the caller should open the schedule editor once this sheet is out of the
-/// way.
+/// A plain label with a value and a chevron, for a row that leaves the sheet.
+class _SettingsRow extends StatelessWidget {
+  const _SettingsRow({required this.label, required this.value, required this.onTap});
+
+  final String label;
+  final String value;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    return Pressable(
+      onTap: onTap,
+      scale: .985,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(20, 18, 18, 18),
+        decoration: surfaceOf(c, Lift.flat, radius: BorderRadius.circular(22)),
+        child: Row(
+          children: [
+            Expanded(child: Text(label, style: MullType.cardTitle(c.ink, size: 16))),
+            Text(value, style: MullType.caption(c.ink3)),
+            const SizedBox(width: 10),
+            MullIcon(MullGlyph.chevronRight, size: 14, color: c.ink3, strokeWidth: 1.8),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Resolves to 'deleted' when the group was removed, 'people' when the caller
+/// should open the members screen, or 'add-recurring' when it should open the
+/// schedule editor — each once this sheet is out of the way.
 Future<String?> showGroupSettings(BuildContext context, Group group) =>
     showMullSheet<String>(context, height: 700, builder: (_) => _GroupSettingsSheet(group: group));
 
@@ -859,8 +841,8 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
   @override
   Widget build(BuildContext context) {
     final c = context.c;
-    final store = context.store;
     final group = widget.group;
+    final admin = group.youAreAdmin;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -874,71 +856,54 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 if (!group.isDirect) ...[
-                  BigField(controller: _name, hint: 'Name', onChanged: (_) => _apply()),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2, right: 16),
+                        child: IconWell(
+                          iconKey: group.icon,
+                          size: 44,
+                          glyphSize: 21,
+                          onTap: admin
+                              ? () async {
+                                  await pickGroupIcon(context, group);
+                                  if (mounted) setState(() {});
+                                }
+                              : null,
+                        ),
+                      ),
+                      Expanded(
+                        child: BigField(
+                          controller: _name,
+                          hint: 'Name',
+                          // Typing into a field that silently refuses to save
+                          // is worse than not offering it, and the server
+                          // refuses a rename from anyone who is not an admin.
+                          onChanged: admin ? (_) => _apply() : null,
+                          help: admin
+                              ? null
+                              : Text(
+                                  'Only an admin can rename this group or change its icon.',
+                                  style: ranade(12, height: 1.5, color: c.ink3),
+                                ),
+                        ),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 28),
                 ],
-                Eyebrow('${group.members.length} people'),
-                const SizedBox(height: 4),
-                Text(
-                  'Tap someone to add the UPI ID that makes settling one tap, and '
-                  'the number a reminder goes to.',
-                  style: ranade(12, height: 1.6, color: c.ink3),
+                // People have a screen of their own now. This used to be the
+                // only place membership lived, which meant a row of chips was
+                // carrying roles, balances and removal all at once.
+                _SettingsRow(
+                  label: group.isDirect ? 'The two of you' : 'People',
+                  value: [
+                    '${group.members.length}',
+                    if (!group.isDirect && admin) 'you run it',
+                  ].join(' · '),
+                  onTap: () => Navigator.of(context).pop('people'),
                 ),
-                const SizedBox(height: 14),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final m in group.members)
-                      NameChip(
-                        store.shortName(m),
-                        detail: m.upiId == null ? null : '·',
-                        selected: m.isYou,
-                        onTap: () => showMemberSheet(context, group, m),
-                        onRemove: store.canRemoveMember(group, m) ? () => store.removeMember(group, m) : null,
-                      ),
-                  ],
-                ),
-                if (!group.isDirect) ...[
-                  const SizedBox(height: 14),
-                  SecondaryButton(
-                    'Add from friends',
-                    onTap: () async {
-                      final picked = await showFriendPicker(
-                        context,
-                        alreadyIn: {
-                          for (final m in group.members)
-                            if (m.userId != null) m.userId!,
-                        },
-                      );
-                      if (picked == null) return;
-                      for (final friend in picked) {
-                        store.addFriendAsMember(
-                          group,
-                          userId: friend.userId!,
-                          name: friend.label,
-                          email: friend.email,
-                          upiId: friend.upiId,
-                        );
-                      }
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  _PeopleInput(onAdd: (n) => store.addMember(group, n)),
-                  const SizedBox(height: 12),
-                  Text(
-                    'A friend brings their own name and UPI ID. Someone added by hand '
-                    'is a placeholder until they join. You can fill in their details, '
-                    'but a UPI ID you type yourself pays whoever owns it.',
-                    style: ranade(11.5, height: 1.6, color: c.ink3),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    'Anyone who has paid for something or owes a share stays. Removing '
-                    'them would quietly change what everyone else owes.',
-                    style: ranade(11.5, height: 1.6, color: c.ink3),
-                  ),
-                ],
                 const SizedBox(height: 26),
                 Eyebrow('Repeating · ${group.recurring.length}', size: 10.5, tracking: .18),
                 const SizedBox(height: 12),
@@ -967,7 +932,24 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
-          child: SecondaryButton(group.isDirect ? 'Delete this ledger' : 'Delete group', onTap: _delete),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SecondaryButton(
+                group.isDirect ? 'Delete this ledger' : 'Delete group',
+                onTap: admin ? _delete : null,
+              ),
+              if (!admin) ...[
+                const SizedBox(height: 10),
+                Text(
+                  'Only an admin can delete a group. You can leave it from People.',
+                  textAlign: TextAlign.center,
+                  style: MullType.caption(c.ink3, size: 11.5),
+                ),
+              ],
+            ],
+          ),
         ),
       ],
     );

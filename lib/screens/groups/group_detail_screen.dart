@@ -10,7 +10,9 @@ import '../../ui/page.dart';
 import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
 import 'group_sheets.dart';
+import 'icon_picker.dart';
 import 'ledger_screen.dart';
+import 'members_screen.dart';
 import 'recurring_screen.dart';
 import 'recurring_sheets.dart';
 import 'settle_up_screen.dart';
@@ -40,18 +42,20 @@ class GroupDetailScreen extends StatelessWidget {
     final active = group.recurring.where((r) => r.isActive).length;
     final settlements = group.settlements.length;
 
+    void push(Widget screen) =>
+        Navigator.of(context).push(CupertinoPageRoute(builder: (_) => screen));
+
     Future<void> settings() async {
       final result = await showGroupSettings(context, group);
       if (!context.mounted) return;
       if (result == 'deleted') {
         Navigator.of(context).pop();
+      } else if (result == 'people') {
+        push(GroupMembersScreen(groupId: group.id));
       } else if (result == 'add-recurring') {
         showRecurringEditor(context, group);
       }
     }
-
-    void push(Widget screen) =>
-        Navigator.of(context).push(CupertinoPageRoute(builder: (_) => screen));
 
     // One focal object. Whatever is waiting on an answer takes it; with
     // nothing outstanding, settling up does.
@@ -64,6 +68,7 @@ class GroupDetailScreen extends StatelessWidget {
 
     return MullPage(
       glow: const GlowSpec(size: 440, top: -160, left: -150, right: null),
+      onRefresh: store.pullNow,
       header: DetailBar(
         // The people count is the subtitle under the title. Repeating it up
         // here as an eyebrow reads as a mistake.
@@ -79,10 +84,29 @@ class GroupDetailScreen extends StatelessWidget {
         onTap: () => showAddExpense(context, group),
       ),
       children: [
+        // The icon sits above the title rather than beside it: a 32pt title
+        // next to a 38px badge makes the badge look like a button, and the
+        // one thing on this screen that must not compete with the number is
+        // the name of the thing the number is about.
+        if (!group.isDirect)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Gutter.text, 22, Gutter.text, 0),
+            child: Row(
+              children: [
+                Pressable(
+                  onTap: group.youAreAdmin ? () => pickGroupIcon(context, group) : null,
+                  scale: .92,
+                  semanticLabel: 'Group icon',
+                  child: GroupBadge(group: group, size: 44, glyphSize: 21),
+                ),
+              ],
+            ),
+          ),
+
         PageTitle(
           group.title,
           subtitle: group.isDirect ? 'Just you two' : '${group.members.length} people',
-          padding: const EdgeInsets.fromLTRB(Gutter.text, 22, Gutter.text, 0),
+          padding: EdgeInsets.fromLTRB(Gutter.text, group.isDirect ? 22 : 16, Gutter.text, 0),
         ),
 
         HeroAmount(
@@ -146,7 +170,12 @@ class GroupDetailScreen extends StatelessWidget {
                   style: MullType.body(c.ink3),
                 ),
                 const SizedBox(height: 20),
-                InlineButton('Add people', height: 48, expand: true, onTap: settings),
+                InlineButton(
+                  'Add people',
+                  height: 48,
+                  expand: true,
+                  onTap: () => push(GroupMembersScreen(groupId: group.id)),
+                ),
               ],
             ),
           ),
@@ -164,6 +193,17 @@ class GroupDetailScreen extends StatelessWidget {
                   : '${_words(transfers.length)} payments clear the group',
               lift: somethingWaiting || alone ? Lift.card : Lift.focal,
               onTap: () => push(SettleUpScreen(groupId: group.id)),
+            ),
+            _Destination(
+              title: group.isDirect ? 'The two of you' : 'People',
+              detail: group.isDirect
+                  ? null
+                  : [
+                      '${group.members.length}',
+                      if (group.youAreAdmin) 'you run it',
+                    ].join(' · '),
+              lift: Lift.flat,
+              onTap: () => push(GroupMembersScreen(groupId: group.id)),
             ),
             _Destination(
               title: 'Recurring',

@@ -1,6 +1,10 @@
+import 'package:flutter/cupertino.dart' show CupertinoSliverRefreshControl, RefreshIndicatorMode;
 import 'package:flutter/material.dart';
 
+import '../data/notices.dart';
 import '../data/store.dart';
+import '../screens/friends_sheet.dart';
+import '../screens/notices_sheet.dart';
 import '../screens/profile_sheet.dart';
 import 'tokens.dart';
 import 'widgets.dart';
@@ -34,10 +38,20 @@ class MullPage extends StatefulWidget {
     this.bottom,
     this.footnote,
     this.header,
+    this.onRefresh,
   });
 
   final List<Widget> children;
   final GlowSpec glow;
+
+  /// Drag the page down to ask the server again.
+  ///
+  /// Mull refreshes itself — realtime, a poll behind it, and a pull on resume —
+  /// so this is not how the screen stays current. It is here because someone
+  /// looking at a number they believe is wrong will reach for it, and a page
+  /// that does not answer that reach feels broken whatever it is doing
+  /// underneath.
+  final Future<void> Function()? onRefresh;
 
   /// The button block at the foot of the screen.
   final Widget? bottom;
@@ -83,6 +97,9 @@ class _MullPageState extends State<MullPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkOverflow());
     final c = context.c;
     final store = context.store;
+    // Subscribed to, not merely read: the unread dot has to appear the moment
+    // a notice arrives, without anyone touching the screen.
+    final inbox = context.notices;
     final isHome = widget.header == null;
     final top = MediaQuery.paddingOf(context).top;
     final headerTop = (top > 0 ? top : 20.0) + (isHome ? 18.0 : 14.0);
@@ -98,14 +115,37 @@ class _MullPageState extends State<MullPage> {
             Positioned.fill(
               child: NotificationListener<ScrollNotification>(
                 onNotification: _onScroll,
-                child: ListView(
+                child: CustomScrollView(
                   controller: _scroll,
                   physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
-                  padding: EdgeInsets.only(
-                    top: headerTop + 44,
-                    bottom: ctaBottom + _bottomHeight + 24,
-                  ),
-                  children: widget.children,
+                  slivers: [
+                    // First, and it has to be: the control reads the scroll
+                    // view's own overscroll, and anything above it absorbs the
+                    // drag before it ever gets there. Its indicator carries the
+                    // top inset itself so it lands under the bar rather than
+                    // behind it.
+                    if (widget.onRefresh != null)
+                      CupertinoSliverRefreshControl(
+                        refreshTriggerPullDistance: 120,
+                        refreshIndicatorExtent: 74,
+                        onRefresh: widget.onRefresh,
+                        builder: (_, mode, pulled, trigger, extent) => _PullIndicator(
+                          mode: mode,
+                          pulled: pulled,
+                          trigger: trigger,
+                          topInset: headerTop,
+                        ),
+                      ),
+                    SliverPadding(
+                      padding: EdgeInsets.only(
+                        top: headerTop + 44,
+                        bottom: ctaBottom + _bottomHeight + 24,
+                      ),
+                      sliver: SliverList(
+                        delegate: SliverChildListDelegate(widget.children),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -127,6 +167,9 @@ class _MullPageState extends State<MullPage> {
                       BrandBar(
                         initial: store.profile.initial,
                         onProfile: () => showProfileSheet(context),
+                        onFriends: () => showFriendsSheet(context),
+                        onNotices: inbox == null ? null : () => showNoticesSheet(context),
+                        unread: inbox?.unread ?? 0,
                       ),
                 ),
               ),
@@ -187,6 +230,52 @@ class _MullPageState extends State<MullPage> {
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// What a pull-to-refresh draws.
+///
+/// Not Cupertino's stock spinner: it is grey, it is always at full strength,
+/// and it appears the instant you touch the screen. This fades up with the
+/// drag, so a page that was not being pulled deliberately shows nothing at all,
+/// and settles into a ring while the answer is on its way.
+class _PullIndicator extends StatelessWidget {
+  const _PullIndicator({
+    required this.mode,
+    required this.pulled,
+    required this.trigger,
+    required this.topInset,
+  });
+
+  final RefreshIndicatorMode mode;
+  final double pulled;
+  final double trigger;
+  final double topInset;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final progress = (pulled / trigger).clamp(0.0, 1.0);
+    final busy = mode == RefreshIndicatorMode.refresh || mode == RefreshIndicatorMode.armed;
+
+    return Padding(
+      padding: EdgeInsets.only(top: topInset + 10),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: Opacity(
+          opacity: busy ? 1 : progress,
+          child: SizedBox.square(
+            dimension: 20,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.8,
+              color: c.ink2,
+              // Before it fires, the ring is the drag itself drawn back at you.
+              value: busy ? null : progress,
+            ),
+          ),
         ),
       ),
     );

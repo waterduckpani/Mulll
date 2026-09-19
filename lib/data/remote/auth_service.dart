@@ -93,6 +93,40 @@ class AuthService {
     }
   }
 
+  /// The profile row behind the current session.
+  ///
+  /// This is what tells a returning user apart from a new one, and it has to
+  /// come off the server because the flag the app used to ask — `onboarded` in
+  /// `mull.json` — is a fact about *this install*, not about the account. A new
+  /// phone, a reinstall or a "start over" all clear it, and every one of those
+  /// used to drop someone who has been using Mull for months back into "what
+  /// should we call you?".
+  ///
+  /// A brand new account has a row too, created by the signup trigger, with an
+  /// empty name. So the question is not "is there a profile" but "does it know
+  /// who you are yet".
+  static Future<({String name, String? upiId})?> fetchProfile() async {
+    final id = Backend.user?.id;
+    if (id == null) return null;
+    try {
+      final row = await Backend.client
+          .from('profiles')
+          .select('name, upi_id')
+          .eq('id', id)
+          .maybeSingle();
+      if (row == null) return null;
+      return (
+        name: (row['name'] as String?) ?? '',
+        upiId: (row['upi_id'] as String?)?.trim().isEmpty ?? true
+            ? null
+            : (row['upi_id'] as String).trim(),
+      );
+    } catch (e) {
+      debugPrint('mull: fetchProfile failed ($e)');
+      return null;
+    }
+  }
+
   static Future<void> signOut() async {
     if (!Backend.isAvailable) return;
     try {

@@ -29,6 +29,15 @@ DateTime? _date(Object? v) => v == null ? null : DateTime.parse(v as String);
 /// not even: one person had the dessert, two share a room, rent is by room size.
 enum SplitMethod { equal, exact, shares, percent }
 
+/// What a seat is allowed to decide.
+///
+/// Two, on purpose. A permissions matrix is the wrong amount of app for four
+/// flatmates; what a group actually needs is a name against the decisions —
+/// who renamed it, who removed Kabir — and a short answer to "may I do this".
+/// Everything about the *ledger* — adding an expense, settling up, confirming
+/// a payment — is open to everyone, because that is what being in a group is.
+enum MemberRole { admin, member }
+
 class Member {
   Member({
     String? id,
@@ -38,12 +47,18 @@ class Member {
     this.email,
     this.phone,
     this.userId,
-    this.nudgedAt,
-  }) : id = id ?? newId();
+    this.role = MemberRole.member,
+    List<DateTime>? nudges,
+  }) : id = id ?? newId(),
+       nudges = nudges ?? [];
 
   final String id;
   String name;
   final bool isYou;
+
+  MemberRole role;
+
+  bool get isAdmin => role == MemberRole.admin;
 
   /// How an unclaimed seat finds its owner. You add "Ritu" tonight; if she ever
   /// signs up on this address or number, the seat becomes hers and the history
@@ -65,9 +80,19 @@ class Member {
   /// a retyped amount.
   String? upiId;
 
-  /// When you last chased them. Kept on this phone only: it exists to stop
-  /// *you* nagging twice in an hour, not to tell them off.
-  DateTime? nudgedAt;
+  /// When you have chased them, most recent last.
+  ///
+  /// A list rather than a single date because the allowance is two a day, not
+  /// one — and the count is what decides whether the button is live. This copy
+  /// is only so the button can say so *before* it is pressed; the limit that
+  /// actually holds is counted on the server, where reinstalling the app does
+  /// not reset it.
+  final List<DateTime> nudges;
+
+  DateTime? get nudgedAt => nudges.isEmpty ? null : nudges.last;
+
+  /// How many of the last day's nudges were yours.
+  int nudgesSince(DateTime cutoff) => nudges.where((n) => n.isAfter(cutoff)).length;
 
   String get initials {
     final parts = name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
@@ -87,7 +112,8 @@ class Member {
     'email': email,
     'phone': phone,
     'userId': userId,
-    'nudgedAt': nudgedAt?.toIso8601String(),
+    'role': role.name,
+    'nudges': nudges.map((n) => n.toIso8601String()).toList(),
   };
 
   factory Member.fromJson(Map<String, dynamic> j) => Member(
@@ -98,7 +124,15 @@ class Member {
     email: j['email'] as String?,
     phone: j['phone'] as String?,
     userId: j['userId'] as String?,
-    nudgedAt: _date(j['nudgedAt']),
+    role: MemberRole.values.byName(j['role'] as String? ?? 'member'),
+    // A file written before the allowance became two a day has one date under
+    // the old name. It still counts, so it is read as a list of one rather
+    // than thrown away — otherwise updating the app hands everyone a fresh
+    // set of reminders to send.
+    nudges: [
+      for (final n in (j['nudges'] as List? ?? const [])) DateTime.parse(n as String),
+      if (j['nudgedAt'] != null) _date(j['nudgedAt'])!,
+    ],
   );
 }
 
@@ -385,6 +419,7 @@ class Group {
     String? id,
     required this.name,
     this.kind = GroupKind.group,
+    this.icon,
     List<Member>? members,
     List<Expense>? expenses,
     List<Settlement>? settlements,
@@ -401,6 +436,15 @@ class Group {
   final String id;
   String name;
   final GroupKind kind;
+
+  /// A key into the app's own icon set — 'plane', 'home', 'cutlery'.
+  ///
+  /// Not an image and not an emoji. An image means a storage bucket, an upload
+  /// and a cache; an emoji renders differently on every OS and puts colour into
+  /// a design that has none anywhere else. A key draws the same stroke icon on
+  /// every phone, in the ink colour the rest of the screen is using.
+  String? icon;
+
   final List<Member> members;
   final List<Expense> expenses;
   final List<Settlement> settlements;
@@ -424,6 +468,15 @@ class Group {
 
   Member? memberById(String id) => members.where((m) => m.id == id).firstOrNull;
   Member? get you => members.where((m) => m.isYou).firstOrNull;
+
+  List<Member> get admins => members.where((m) => m.isAdmin).toList();
+
+  /// Whether *you* can rename it, re-badge it, remove people or delete it.
+  ///
+  /// A direct ledger says yes to both seats: "what I owe Ritu" belongs to the
+  /// two of you equally, and one of you holding it hostage is not a hierarchy
+  /// the relationship has.
+  bool get youAreAdmin => isDirect || (you?.isAdmin ?? false);
 
   /// The other seat in a direct ledger. Null in a real group.
   Member? get counterpart =>
@@ -478,6 +531,7 @@ class Group {
     'id': id,
     'name': name,
     'kind': kind.name,
+    'icon': icon,
     'members': members.map((m) => m.toJson()).toList(),
     'expenses': expenses.map((e) => e.toJson()).toList(),
     'settlements': settlements.map((s) => s.toJson()).toList(),
@@ -490,6 +544,7 @@ class Group {
     id: j['id'] as String,
     name: j['name'] as String,
     kind: GroupKind.values.byName(j['kind'] as String? ?? 'group'),
+    icon: j['icon'] as String?,
     members: (j['members'] as List).map((m) => Member.fromJson((m as Map).cast())).toList(),
     expenses: (j['expenses'] as List? ?? []).map((e) => Expense.fromJson((e as Map).cast())).toList(),
     settlements: (j['settlements'] as List? ?? []).map((s) => Settlement.fromJson((s as Map).cast())).toList(),

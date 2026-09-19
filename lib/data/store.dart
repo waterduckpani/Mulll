@@ -11,12 +11,19 @@ import '../core/split.dart';
 import '../core/upi_receipt.dart';
 import 'models.dart';
 
-/// How long to leave between nudges to the same person.
+/// How many reminders one person may send another, and over what.
 ///
-/// A reminder is a favour to both sides right up until it is the second one
-/// today, at which point it is nagging and gets read as rude. Mull will not
-/// send one for you inside this window.
-const kNudgeCooldown = Duration(hours: 20);
+/// Two. One is a favour to both sides; the second is a fair "did you see
+/// this?"; the third is nagging, and an app that makes nagging effortless is
+/// an app people leave. A rolling day rather than a calendar one, because
+/// midnight is not a reset anybody experiences — two at 11pm and two more at
+/// 12:05am is four buzzes inside ten minutes and technically within the rules.
+///
+/// This copy is so the button can say so before it is pressed. The limit that
+/// actually holds is counted on the server, where reinstalling does not clear
+/// it.
+const kNudgesPerDay = 2;
+const kNudgeWindow = Duration(hours: 24);
 
 /// Single source of truth. Local-first: everything is persisted to one JSON file.
 class MullStore extends ChangeNotifier {
@@ -38,6 +45,52 @@ class MullStore extends ChangeNotifier {
 
   /// Called after a group is deleted, so the server can tombstone it.
   Future<void> Function(String groupId)? onGroupDeleted;
+
+  /// Asks the backend for everything again. Set alongside the push hooks; null
+  /// in tests and in a signed-out app, where there is nothing to ask.
+  Future<void> Function()? onPullRequested;
+
+  /// Tells the people a local change actually affects that it happened.
+  ///
+  /// Only fired by real edits made on this phone. A pull replaces the whole
+  /// ledger and must stay silent, or every device would announce everyone
+  /// else's work back to them.
+  void Function(Notice notice)? onNotice;
+
+  /// What to call a member *in a sentence somebody else will read*.
+  ///
+  /// [shortName] answers "You" for your own seat, which is right on every
+  /// screen in this app and wrong in every notification it sends: "You says
+  /// they sent you ₹500" is what that produces on the other person's phone.
+  String _theirNameFor(Member m) {
+    final name = (m.isYou ? profile.name : m.name).trim();
+    return name.isEmpty ? 'Someone' : name.split(' ').first;
+  }
+
+  void _tell(Notice? notice) {
+    if (notice == null || notice.to.isEmpty) return;
+    onNotice?.call(notice);
+  }
+
+  /// The account ids of the people in a group who could actually be told —
+  /// a placeholder seat has nobody behind it — minus yourself.
+  List<String> _reachable(Group group, Iterable<String> memberIds) {
+    final me = group.you?.id;
+    final seen = <String>{};
+    return [
+      for (final id in memberIds)
+        if (id != me)
+          if (group.memberById(id)?.userId case final user? when seen.add(user)) user,
+    ];
+  }
+
+  /// Fetches the shared ledger now rather than waiting for a realtime event.
+  ///
+  /// Realtime is the fast path and not a guarantee — a socket that dropped in
+  /// a tunnel reconnects silently and the events that happened meanwhile are
+  /// simply gone. Anything that wants to be *sure* the screen is current (a
+  /// resume, a pull-to-refresh, a poll) comes through here.
+  Future<void> pullNow() async => onPullRequested?.call();
 
   /// Local edit first, network afterwards — the UI should never wait on a
   /// round trip to feel like it worked.
@@ -78,7 +131,9 @@ class MullStore extends ChangeNotifier {
         group.recurring.addAll(previous.recurring);
       }
       for (final member in group.members) {
-        member.nudgedAt ??= previous.memberById(member.id)?.nudgedAt;
+        if (member.nudges.isEmpty) {
+          member.nudges.addAll(previous.memberById(member.id)?.nudges ?? const []);
+        }
       }
     }
 
@@ -219,6 +274,21 @@ class MullStore extends ChangeNotifier {
     _commit();
   }
 
+  /// Takes what the account already knows and finishes onboarding with it.
+  ///
+  /// Signing in on a new phone is not signing up. The account has a name and a
+  /// UPI ID on it already, so asking for them again is asking a question the
+  /// server can answer — and the answer it gets is whatever the person types
+  /// the second time, which then overwrites the real one.
+  void adoptAccount({required String name, String? upiId}) {
+    profile
+      ..name = name.trim()
+      ..onboarded = true;
+    if (upiId != null && upiId.trim().isNotEmpty) profile.upiId = upiId.trim();
+    _renameYourSeats();
+    _commit();
+  }
+
   void updateProfile(void Function(Profile p) edit) {
     edit(profile);
     _renameYourSeats();
@@ -251,12 +321,23 @@ class MullStore extends ChangeNotifier {
     List<String> others, {
     List<Member> friends = const [],
     GroupKind kind = GroupKind.group,
+    String? icon,
   }) {
     final group = Group(
       name: name.trim(),
       kind: kind,
+      icon: icon,
       members: [
-        Member(name: profile.name.isEmpty ? 'You' : profile.name, isYou: true, upiId: profile.upiId),
+        // Whoever starts a group runs it. Not a privilege so much as an
+        // answer: somebody has to be able to rename it, remove the person who
+        // left, and eventually delete it, and "the person who made it" is the
+        // only answer that needs no ceremony.
+        Member(
+          name: profile.name.isEmpty ? 'You' : profile.name,
+          isYou: true,
+          upiId: profile.upiId,
+          role: MemberRole.admin,
+        ),
         ...friends,
         for (final n in others)
           if (n.trim().isNotEmpty) Member(name: n.trim()),
@@ -264,6 +345,15 @@ class MullStore extends ChangeNotifier {
     );
     groups.add(group);
     _commitGroup(group);
+    _tell(
+      Notice(
+        to: _reachable(group, group.members.map((m) => m.id)),
+        groupId: group.id,
+        kind: NoticeKind.addedToGroup,
+        title: '${_theirNameFor(group.you!)} added you to ${group.name}',
+        body: '${group.members.length} people',
+      ),
+    );
     return group;
   }
 
@@ -296,8 +386,24 @@ class MullStore extends ChangeNotifier {
       name: name.trim(),
       kind: GroupKind.direct,
       members: [
-        Member(name: profile.name.isEmpty ? 'You' : profile.name, isYou: true, upiId: profile.upiId),
-        Member(name: name.trim(), userId: userId, email: email, phone: phone, upiId: upiId),
+        // Both seats, because a one-to-one ledger has no hierarchy in it.
+        // "What I owe Ritu" belongs to the two of you equally, and whoever
+        // happened to open it first holding it hostage is not a power the
+        // relationship has.
+        Member(
+          name: profile.name.isEmpty ? 'You' : profile.name,
+          isYou: true,
+          upiId: profile.upiId,
+          role: MemberRole.admin,
+        ),
+        Member(
+          name: name.trim(),
+          userId: userId,
+          email: email,
+          phone: phone,
+          upiId: upiId,
+          role: MemberRole.admin,
+        ),
       ],
     );
     groups.add(group);
@@ -366,17 +472,51 @@ class MullStore extends ChangeNotifier {
     final member = Member(name: name.trim(), userId: userId, email: email, upiId: upiId);
     group.members.add(member);
     _commitGroup(group);
+    // Being put into a group is the one thing that happens *to* someone rather
+    // than in front of them. Without this, the first they know of it is a
+    // balance that appeared overnight.
+    _tell(
+      Notice(
+        to: [userId],
+        groupId: group.id,
+        kind: NoticeKind.addedToGroup,
+        title: '${_theirNameFor(group.you ?? member)} added you to ${group.title}',
+        body: '${group.members.length} people',
+      ),
+    );
     return member;
   }
 
   /// Refuses to remove anyone the ledger still depends on — deleting a person
   /// who paid for dinner would silently rewrite what everyone else owes.
+  ///
+  /// Two different refusals live here and they are worth telling apart. The
+  /// arithmetic one is absolute: nobody, admin or not, may remove a seat the
+  /// ledger still references. The other is about authority — taking someone
+  /// out of a group is an admin's decision — and it does not apply to leaving,
+  /// which is always yours.
   bool canRemoveMember(Group group, Member member) {
     if (member.isYou || group.isDirect) return false;
+    if (!group.youAreAdmin) return false;
+    return !_ledgerNeeds(group, member);
+  }
+
+  bool _ledgerNeeds(Group group, Member member) {
     final involved = group.expenses.any((e) => e.payerId == member.id || e.shares.containsKey(member.id));
     final settled = group.settlements.any((s) => s.fromId == member.id || s.toId == member.id);
     final scheduled = group.recurring.any((r) => r.payerId == member.id || r.shares.containsKey(member.id));
-    return !involved && !settled && !scheduled;
+    return involved || settled || scheduled;
+  }
+
+  /// Why the app will not remove someone, in the words it should say.
+  String? whyMemberStays(Group group, Member member) {
+    if (member.isYou || group.isDirect) return null;
+    if (_ledgerNeeds(group, member)) {
+      return 'They have paid for something or owe a share. Removing them would '
+          'quietly change what everyone else owes.';
+    }
+    if (!group.youAreAdmin) return 'Only an admin can take someone out of a group.';
+    return null;
   }
 
   bool removeMember(Group group, Member member) {
@@ -384,6 +524,58 @@ class MullStore extends ChangeNotifier {
     group.members.removeWhere((m) => m.id == member.id);
     _commitGroup(group);
     return true;
+  }
+
+  // -------------------------------------------------------------------- admin
+
+  /// Hands the group over, or takes it back.
+  ///
+  /// Refuses to leave a group with nobody running it. That state cannot be
+  /// repaired from inside the app: there would be no one who could rename it,
+  /// remove the person who moved out, or delete it when the trip is over.
+  bool setAdmin(Group group, Member member, bool admin) {
+    if (!group.youAreAdmin || group.isDirect) return false;
+    if (member.isAdmin == admin) return true;
+    if (!admin && group.admins.length < 2) return false;
+    member.role = admin ? MemberRole.admin : MemberRole.member;
+    _commitGroup(group);
+    return true;
+  }
+
+  /// Leaving is always yours to do — but not at the cost of the ledger's
+  /// arithmetic, and not if it would leave the group unadministered.
+  String? whyYouCannotLeave(Group group) {
+    final you = group.you;
+    if (you == null) return null;
+    if (group.isDirect) return null;
+    if (_ledgerNeeds(group, you)) {
+      return 'You have paid for something or owe a share here. Settle up first, '
+          'or the numbers stop adding up for everyone else.';
+    }
+    if (you.isAdmin && group.admins.length < 2 && group.members.length > 1) {
+      return 'You are the only admin. Make someone else one first, so the group '
+          'still has somebody who can run it.';
+    }
+    return null;
+  }
+
+  bool leaveGroup(Group group) {
+    final you = group.you;
+    if (you == null || whyYouCannotLeave(group) != null) return false;
+    group.members.removeWhere((m) => m.id == you.id);
+    _commitGroup(group);
+    // Gone from this phone as well: without a seat in it there is nothing here
+    // to see, and the next pull would not return it anyway.
+    groups.removeWhere((g) => g.id == group.id);
+    _commit();
+    return true;
+  }
+
+  /// The mark a group carries in a list. Null means the app draws the default.
+  void setGroupIcon(Group group, String? icon) {
+    if (!group.youAreAdmin) return;
+    group.icon = icon;
+    _commitGroup(group);
   }
 
   void setUpiId(Member member, String? upiId) {
@@ -430,7 +622,31 @@ class MullStore extends ChangeNotifier {
     );
     group.expenses.add(expense);
     _commitGroup(group);
+    _tell(_expenseNotice(group, expense));
     return expense;
+  }
+
+  /// Everyone whose money this expense moves, and nobody else.
+  ///
+  /// The parties are the people in the split plus whoever paid — not the
+  /// group. Eight flatmates should not each get a buzz because two of them
+  /// split a chai, and a member who sat this one out has nothing to check.
+  Notice? _expenseNotice(Group group, Expense expense) {
+    final payer = group.memberById(expense.payerId);
+    final to = _reachable(group, {expense.payerId, ...expense.shares.keys});
+    if (to.isEmpty || payer == null) return null;
+    // Deliberately impersonal. One notice carries one sentence to several
+    // people, so anything phrased as "your share" would be *this* phone's
+    // share read out to everybody else. The group screen is one tap away and
+    // knows what each person owes.
+    return Notice(
+      to: to,
+      groupId: group.id,
+      kind: NoticeKind.expenseAdded,
+      title: '${_theirNameFor(payer)} added ${expense.description}',
+      body: '${inr(expense.amount)} · ${group.isDirect ? 'with you' : group.title}',
+      amount: expense.amount,
+    );
   }
 
   void updateExpense(Group group, Expense expense) => _commitGroup(group);
@@ -616,6 +832,27 @@ class MullStore extends ChangeNotifier {
     );
     group.settlements.add(settlement);
     _commitGroup(group);
+    // Settling is between two people even in a group of eight, so this goes to
+    // the other end of the payment and stops there. The group does not need to
+    // know, and telling it would turn every transfer into a public notice.
+    final other = fromId == me ? toId : fromId;
+    final mover = group.memberById(fromId);
+    if (mover != null) {
+      _tell(
+        Notice(
+          to: _reachable(group, [other]),
+          groupId: group.id,
+          kind: NoticeKind.settlementClaimed,
+          title: needsConfirming
+              ? '${_theirNameFor(mover)} says they sent you ${inr(amount)}'
+              : '${_theirNameFor(mover)} settled ${inr(amount)}',
+          body: needsConfirming
+              ? 'Check it landed, then confirm it in ${group.title}'
+              : group.title,
+          amount: amount,
+        ),
+      );
+    }
     return settlement;
   }
 
@@ -624,6 +861,18 @@ class MullStore extends ChangeNotifier {
       ..status = SettlementStatus.confirmed
       ..confirmedAt = now();
     _commitGroup(group);
+    final payer = group.memberById(settlement.fromId);
+    if (payer == null) return;
+    _tell(
+      Notice(
+        to: _reachable(group, [settlement.fromId]),
+        groupId: group.id,
+        kind: NoticeKind.settlementConfirmed,
+        title: '${_theirNameFor(group.you ?? payer)} confirmed your ${inr(settlement.amount)}',
+        body: 'That clears it in ${group.title}',
+        amount: settlement.amount,
+      ),
+    );
   }
 
   /// "I never got that." Keeps the record rather than deleting it, so the
@@ -634,6 +883,22 @@ class MullStore extends ChangeNotifier {
       ..status = SettlementStatus.disputed
       ..confirmedAt = null;
     _commitGroup(group);
+    final payer = group.memberById(settlement.fromId);
+    if (payer == null) return;
+    // The one notice the app owes somebody more than any other. A disputed
+    // payment that nobody is told about is a balance the payer believes is
+    // clear and the payee believes is not, and the two of them find out weeks
+    // later in an argument.
+    _tell(
+      Notice(
+        to: _reachable(group, [settlement.fromId]),
+        groupId: group.id,
+        kind: NoticeKind.settlementDisputed,
+        title: '${_theirNameFor(group.you ?? payer)} has not seen your ${inr(settlement.amount)}',
+        body: 'It is still open in ${group.title}',
+        amount: settlement.amount,
+      ),
+    );
   }
 
   void removeSettlement(Group group, Settlement settlement) {
@@ -700,23 +965,41 @@ class MullStore extends ChangeNotifier {
           member: debtor,
           amount: (held?.amount ?? 0) + t.amount,
           groups: [...?held?.groups, group],
-          lastNudgedAt: held?.lastNudgedAt ?? debtor.nudgedAt,
+          // The same person holds a separate seat in every group, and each
+          // seat carries its own record of being chased. Netting the debt but
+          // not the reminders would hand you a fresh allowance per group,
+          // which is the same three messages this is meant to prevent.
+          //
+          // The longest history wins rather than the union of them. Every
+          // nudge stamps *all* of that person's seats at the same instant, so
+          // the fullest list is the true one — and merging them would depend
+          // on two DateTimes written in the same breath comparing equal,
+          // which is a coincidence to rely on rather than a rule.
+          nudges: _longer(held?.nudges, debtor.nudges),
         );
       }
     }
     return byPerson.values.toList()..sort((a, b) => b.amount.compareTo(a.amount));
   }
 
-  bool canNudge(Owing owing) {
-    final last = owing.lastNudgedAt;
-    return last == null || now().difference(last) > kNudgeCooldown;
+  static List<DateTime> _longer(List<DateTime>? a, List<DateTime> b) =>
+      (a?.length ?? 0) >= b.length ? [...?a] : [...b];
+
+  /// How many more times you may chase this person today.
+  int nudgesLeft(Owing owing) {
+    final cutoff = now().subtract(kNudgeWindow);
+    final spent = owing.nudges.where((n) => n.isAfter(cutoff)).length;
+    return (kNudgesPerDay - spent).clamp(0, kNudgesPerDay);
   }
 
-  /// The message a nudge sends. Short, and it ends with the way to pay.
+  bool canNudge(Owing owing) => nudgesLeft(owing) > 0;
+
+  /// The message a nudge carries. Short, and it ends with the way to pay.
   ///
-  /// Written to be forwarded and read by someone who may not have Mull, which
-  /// is why it names the amount and the reason in plain words rather than
-  /// linking to a screen only you can see.
+  /// Still written as plain sentences rather than as a screenful of fields.
+  /// It arrives inside Mull now, but it is the same words either way, and
+  /// someone reading "Ananya · ₹500 · Goa" on a lock screen should not have to
+  /// open anything to know what is being asked.
   String nudgeMessage(Owing owing) {
     final where = owing.groups.length == 1
         ? ' for ${owing.groups.first.title}'
@@ -731,13 +1014,33 @@ class MullStore extends ChangeNotifier {
 
   void markNudged(Owing owing) {
     final at = now();
+    final cutoff = at.subtract(kNudgeWindow);
     for (final group in owing.groups) {
       final seat = group.memberById(owing.member.id) ??
           group.members.where((m) => !m.isYou && m.name == owing.member.name).firstOrNull;
-      seat?.nudgedAt = at;
+      if (seat == null) continue;
+      seat.nudges
+        // Anything older than the window can never affect the count again, and
+        // keeping it would grow this list forever in a file the app rewrites
+        // on every edit.
+        ..removeWhere((n) => !n.isAfter(cutoff))
+        ..add(at);
     }
-    owing.member.nudgedAt = at;
+    owing.nudges.add(at);
     _commit();
+  }
+
+  /// Brings the local count up to what the server just told us it is.
+  ///
+  /// The two can drift honestly: the allowance is per account, and a reminder
+  /// sent from another phone never touched this one's copy. When the server
+  /// says the allowance is gone, it is gone — arguing with it only means the
+  /// button stays lit over a call that will keep being refused.
+  void spendNudges(Owing owing) {
+    var guard = 0;
+    while (nudgesLeft(owing) > 0 && guard++ <= kNudgesPerDay) {
+      markNudged(owing);
+    }
   }
 
   // ---------------------------------------------------------------- readouts
@@ -866,8 +1169,8 @@ class MullStore extends ChangeNotifier {
     // The numbers are worked so the group lands exactly where the mockups put
     // it: you ₹2,400 up, Sahil owing ₹800 and Kabir ₹1,600, which is the two
     // payments the settle-up screen offers.
-    final goa = Group(name: 'Goa trip');
-    final you = Member(name: profile.name, isYou: true, upiId: profile.upiId);
+    final goa = Group(name: 'Goa trip', icon: 'beach');
+    final you = Member(name: profile.name, isYou: true, upiId: profile.upiId, role: MemberRole.admin);
     final sahil = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
     final ananya = Member(name: 'Ananya Rao', upiId: 'ananya@ybl', userId: newId());
     // No userId and no VPA: a placeholder seat, settled in person.
@@ -959,8 +1262,8 @@ class MullStore extends ChangeNotifier {
     );
 
     // ---- Flat: the standing costs, one of them nearly due.
-    final flat = Group(name: 'Flat');
-    final youFlat = Member(name: profile.name, isYou: true, upiId: profile.upiId);
+    final flat = Group(name: 'Flat', icon: 'home');
+    final youFlat = Member(name: profile.name, isYou: true, upiId: profile.upiId, role: MemberRole.admin);
     final bhavya = Member(name: 'Bhavya Nair', upiId: 'bhavya@okicici', userId: newId());
     final sahilFlat = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
     final dev = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
@@ -1022,8 +1325,8 @@ class MullStore extends ChangeNotifier {
     ]);
 
     // ---- Sunday football: square, and still worth keeping.
-    final football = Group(name: 'Sunday football');
-    final youBall = Member(name: profile.name, isYou: true, upiId: profile.upiId);
+    final football = Group(name: 'Sunday football', icon: 'football');
+    final youBall = Member(name: profile.name, isYou: true, upiId: profile.upiId, role: MemberRole.admin);
     final sahilBall = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
     final devBall = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
     football.members.addAll([youBall, sahilBall, devBall]);
@@ -1078,19 +1381,83 @@ class MullStore extends ChangeNotifier {
   }
 }
 
+/// Something worth telling specific people about.
+///
+/// Composed here, where the context is — which group, who did it, what it was
+/// for — rather than assembled from parts on the way in. The sentence travels
+/// with the notice, so a phone running an older build can still show one about
+/// a thing it has no template for.
+enum NoticeKind {
+  expenseAdded,
+  expenseRemoved,
+  settlementClaimed,
+  settlementConfirmed,
+  settlementDisputed,
+  reminder,
+  addedToGroup,
+}
+
+extension NoticeKindWire on NoticeKind {
+  /// The enum label Postgres uses. Snake case there, camel here.
+  String get wire => switch (this) {
+    NoticeKind.expenseAdded => 'expense_added',
+    NoticeKind.expenseRemoved => 'expense_removed',
+    NoticeKind.settlementClaimed => 'settlement_claimed',
+    NoticeKind.settlementConfirmed => 'settlement_confirmed',
+    NoticeKind.settlementDisputed => 'settlement_disputed',
+    NoticeKind.reminder => 'reminder',
+    NoticeKind.addedToGroup => 'added_to_group',
+  };
+
+  static NoticeKind read(String? value) => switch (value) {
+    'expense_added' => NoticeKind.expenseAdded,
+    'expense_removed' => NoticeKind.expenseRemoved,
+    'settlement_claimed' => NoticeKind.settlementClaimed,
+    'settlement_confirmed' => NoticeKind.settlementConfirmed,
+    'settlement_disputed' => NoticeKind.settlementDisputed,
+    'reminder' => NoticeKind.reminder,
+    _ => NoticeKind.addedToGroup,
+  };
+}
+
+class Notice {
+  const Notice({
+    required this.to,
+    required this.kind,
+    required this.title,
+    this.body = '',
+    this.groupId,
+    this.amount,
+  });
+
+  /// Account ids, not member ids. A placeholder seat has nobody behind it and
+  /// is simply not on this list.
+  final List<String> to;
+
+  final NoticeKind kind;
+  final String title;
+  final String body;
+  final String? groupId;
+  final int? amount;
+}
+
 /// One person and everything they owe you, netted across every ledger.
 class Owing {
-  const Owing({
+  Owing({
     required this.member,
     required this.amount,
     required this.groups,
-    this.lastNudgedAt,
-  });
+    List<DateTime>? nudges,
+  }) : nudges = nudges ?? [];
 
   final Member member;
   final int amount;
   final List<Group> groups;
-  final DateTime? lastNudgedAt;
+
+  /// Every time you have chased them, across all of those ledgers.
+  final List<DateTime> nudges;
+
+  DateTime? get lastNudgedAt => nudges.isEmpty ? null : nudges.last;
 }
 
 /// Makes the store reachable from any widget and rebuilds dependents on change.

@@ -168,11 +168,28 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       _codeFocus.requestFocus();
       return;
     }
-    setState(() => _busy = false);
     HapticFeedback.mediumImpact();
-    // A returning user is already onboarded, so the root replaces this whole
-    // flow with the app as soon as the session lands. Nothing more to do here.
-    if (!_returning) _goTo(_Step.name, focus: _nameFocus);
+    // This install already knew them, so the root replaces the whole flow with
+    // the app the moment the session lands. Nothing more to do here.
+    if (_returning) {
+      setState(() => _busy = false);
+      return;
+    }
+
+    // This install did not — but the account might have. A reinstall, a second
+    // phone or a "start over" all arrive here looking exactly like a new
+    // signup, and the only thing that can tell the difference is the profile
+    // row. Stay busy across the round trip: a button that flicks back to
+    // "Continue" and then vanishes reads as a glitch.
+    final account = await AuthService.fetchProfile();
+    if (!mounted) return;
+    if (account != null && account.name.trim().isNotEmpty) {
+      context.readStore.adoptAccount(name: account.name, upiId: account.upiId);
+      return; // the root takes over; leaving _busy set keeps the button steady
+    }
+
+    setState(() => _busy = false);
+    _goTo(_Step.name, focus: _nameFocus);
   }
 
   /// Name and UPI are saved together at the end rather than one screen at a
