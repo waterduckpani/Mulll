@@ -24,7 +24,11 @@ The two things it does that other split apps do not:
 ./run-dev.sh                                  # against the live Supabase project
 ./run-dev.sh --sample                         # …seeded with the mockup data
 flutter run                                   # no keys: local-only, groups stay on the phone
+./install-phone.sh                            # release build, installed on a paired iPhone
 ```
+
+A build with no Supabase keys has no account to make, so onboarding skips the email and code steps
+and asks only for a name and a UPI ID.
 
 In debug builds, the profile sheet also has **Load sample data**.
 
@@ -36,8 +40,11 @@ In debug builds, the profile sheet also has **Load sample data**.
 
 ```sh
 flutter test                                  # money, splitting, the ledger, schedules, reminders, persistence
-flutter drive --driver=test_driver/integration_test.dart \
-  --target=integration_test/tour_test.dart    # walks every screen in both themes, writes screenshots/
+
+# Walks every screen and writes screenshots/. A target that fails to compile makes `flutter drive`
+# silently run the previous build, so check `flutter analyze` is clean before trusting a green run.
+flutter drive --driver=test_driver/integration_test.dart --target=integration_test/tour_test.dart
+flutter drive --driver=test_driver/integration_test.dart --target=integration_test/onboarding_test.dart
 ```
 
 ## Layout
@@ -46,8 +53,25 @@ flutter drive --driver=test_driver/integration_test.dart \
   splitting and debt simplification, UPI payment links, UPI receipt reading
 - `lib/data` — models and `MullStore` (local-first, one JSON file, debounced atomic writes),
   plus `remote/` for Supabase auth, friends and group sync
-- `lib/ui` — design tokens (light/dark from the design file), glass, sheets, page scaffold, icons
-- `lib/screens` — home, group detail, the sheets (expense, split, settle, recurring, members), profile, onboarding
+- `lib/ui` — design tokens, surfaces, sheets, page scaffold, icons
+- `lib/screens` — onboarding, home, and under `groups/` the create flow, the group hub and its three
+  destinations (settle up, ledger, recurring), plus the sheets
+
+## The design
+
+Built from `Mull UI spec.pdf` and the eight exported screens (4A–4H). Four rules carry it, and
+`lib/ui/tokens.dart` is where they live:
+
+- **No colour, ever.** Owing and being owed are told apart by the words and the weight, never by
+  hue. There is no accent and no red/green.
+- **No borders, no glass.** Hierarchy is only how high a surface floats: a gradient fill and a
+  shadow. `Lift.focal` / `card` / `low` / `flat`, and **exactly one focal object per screen**.
+- **Two gutters.** Text and titles at 30, cards and buttons at 20, so cards break outboard of the
+  copy above them. `Gutter.text` and `Gutter.card`.
+- **Numbers are Excon and always tabular; words are Ranade.** `MullType` names every role.
+
+Dark is primary; the paper theme is an option in the profile sheet rather than half of a pair.
+There are no em dashes in anything the app shows you.
 - `ios/Shared` — Swift the app and its share extension both compile: Vision OCR, the receipt guess,
   the App Group queue, the palette
 

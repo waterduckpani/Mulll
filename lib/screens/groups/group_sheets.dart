@@ -7,7 +7,6 @@ import '../../core/split.dart';
 import '../../core/upi.dart';
 import '../../core/upi_receipt.dart';
 import '../../data/models.dart';
-import '../../data/remote/friends_service.dart';
 import '../../data/store.dart';
 import '../../ui/icons.dart';
 import '../../ui/sheet.dart';
@@ -17,12 +16,13 @@ import '../friends_sheet.dart';
 import 'recurring_sheets.dart';
 import 'split_editor.dart';
 
-/// Inline "add a name" input that turns entries into chips.
+/// Inline "add a name" input that turns each entry into a seat.
 class _PeopleInput extends StatefulWidget {
-  const _PeopleInput({required this.onAdd, this.hint = 'Add a name'});
+  const _PeopleInput({required this.onAdd});
 
   final ValueChanged<String> onAdd;
-  final String hint;
+
+  static const hint = 'Add a name';
 
   @override
   State<_PeopleInput> createState() => _PeopleInputState();
@@ -53,9 +53,9 @@ class _PeopleInputState extends State<_PeopleInput> {
   Widget build(BuildContext context) {
     final c = context.c;
     return Container(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: c.line)),
+        border: Border(bottom: BorderSide(color: c.inputLine)),
       ),
       child: Row(
         children: [
@@ -70,7 +70,7 @@ class _PeopleInputState extends State<_PeopleInput> {
               onChanged: (_) => setState(() {}),
               onSubmitted: (_) => _submit(),
               decoration: InputDecoration.collapsed(
-                hintText: widget.hint,
+                hintText: _PeopleInput.hint,
                 hintStyle: ranade(16, color: c.ink3.withValues(alpha: .6)),
               ),
             ),
@@ -91,200 +91,9 @@ class _PeopleInputState extends State<_PeopleInput> {
   }
 }
 
-// ------------------------------------------------------------- start a group
-
-Future<void> showStartGroup(BuildContext context, {void Function(Group)? onCreated}) async {
-  final group = await showMullSheet<Group>(context, height: 660, builder: (_) => const _StartGroupSheet());
-  if (group != null) onCreated?.call(group);
-}
-
-class _StartGroupSheet extends StatefulWidget {
-  const _StartGroupSheet();
-
-  @override
-  State<_StartGroupSheet> createState() => _StartGroupSheetState();
-}
-
-class _StartGroupSheetState extends State<_StartGroupSheet> {
-  final _name = TextEditingController();
-  final _people = <String>[];
-
-  /// Friends picked before the group exists. Held as [Friend] rather than
-  /// seated straight away because the group has no id yet — they become members
-  /// in one go when it is created.
-  final _friends = <Friend>[];
-
-  /// A trip and the flat are groups. "What I owe Ritu" is not — inventing a
-  /// group called "Me and Ritu" is the thing people actually hate about split
-  /// apps, so it gets its own shape even though it is the same ledger inside.
-  GroupKind _kind = GroupKind.group;
-
-  bool get _direct => _kind == GroupKind.direct;
-
-  Future<void> _pickFriends() async {
-    final picked = await showFriendPicker(
-      context,
-      alreadyIn: {
-        for (final f in _friends)
-          if (f.userId != null) f.userId!,
-      },
-    );
-    if (picked == null || !mounted) return;
-    setState(() {
-      // A one-to-one ledger has exactly one other seat in it.
-      if (_direct) {
-        _friends
-          ..clear()
-          ..add(picked.first);
-        _people.clear();
-      } else {
-        _friends.addAll(picked);
-      }
-    });
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _name.addListener(() => setState(() {}));
-  }
-
-  @override
-  void dispose() {
-    _name.dispose();
-    super.dispose();
-  }
-
-  /// A group needs a name; a person ledger needs a person.
-  bool get _ready => _direct
-      ? _friends.isNotEmpty || _people.isNotEmpty
-      : _name.text.trim().isNotEmpty;
-
-  void _create() {
-    final store = context.readStore;
-    final Group group;
-    if (_direct) {
-      final friend = _friends.firstOrNull;
-      group = store.directWith(
-        name: friend?.label ?? _people.first,
-        userId: friend?.userId,
-        email: friend?.email,
-        upiId: friend?.upiId,
-      );
-    } else {
-      group = store.addGroup(
-        _name.text,
-        _people,
-        friends: [
-          for (final f in _friends) Member(name: f.label, userId: f.userId, email: f.email, upiId: f.upiId),
-        ],
-      );
-    }
-    HapticFeedback.mediumImpact();
-    Navigator.of(context).pop(group);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    final keyboardUp = MediaQuery.viewInsetsOf(context).bottom > 0;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SheetHeader(_direct ? 'Split with someone' : 'Start a group'),
-        Expanded(
-          child: SingleChildScrollView(
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(30, 12, 30, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                ChoicePair<GroupKind>(
-                  options: const [(GroupKind.group, 'A group'), (GroupKind.direct, 'One person')],
-                  value: _kind,
-                  height: 58,
-                  onChanged: (k) => setState(() {
-                    _kind = k;
-                    if (k == GroupKind.direct && _friends.length > 1) {
-                      _friends.removeRange(1, _friends.length);
-                    }
-                  }),
-                ),
-                const SizedBox(height: 26),
-                if (!_direct) ...[
-                  BigField(
-                    controller: _name,
-                    autofocus: true,
-                    hint: 'Goa trip',
-                    textInputAction: TextInputAction.next,
-                    help: const Text('A trip, the flat, a night out — anywhere costs get shared.'),
-                  ),
-                  const SizedBox(height: 28),
-                ],
-                Eyebrow(_direct ? 'Who with' : "Who's in"),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    if (!_direct) const NameChip('You', selected: true),
-                    for (final (i, f) in _friends.indexed)
-                      NameChip(
-                        f.label,
-                        // The dot marks a seat that carries its own UPI ID,
-                        // which is the difference that matters at settle-up.
-                        detail: f.upiId == null ? null : '·',
-                        onRemove: () => setState(() => _friends.removeAt(i)),
-                      ),
-                    for (final (i, p) in _people.indexed)
-                      NameChip(p, onRemove: () => setState(() => _people.removeAt(i))),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                GhostButton(_direct ? 'Pick a friend' : 'Add from friends', onTap: _pickFriends),
-                const SizedBox(height: 16),
-                if (!_direct || (_friends.isEmpty && _people.isEmpty))
-                  _PeopleInput(
-                    hint: _direct ? 'Or type their name' : 'Add a name',
-                    onAdd: (n) => setState(() {
-                      if (_direct) {
-                        _people
-                          ..clear()
-                          ..add(n);
-                      } else {
-                        _people.add(n);
-                      }
-                    }),
-                  ),
-                const SizedBox(height: 12),
-                Text(
-                  'A friend brings their own name and UPI ID. A typed name is a '
-                  'placeholder — fine for someone not on Mull, but you will have to '
-                  'settle up with them by hand.',
-                  style: ranade(12, height: 1.6, color: c.ink3),
-                ),
-              ],
-            ),
-          ),
-        ),
-        Padding(
-          padding: EdgeInsets.fromLTRB(26, 8, 26, keyboardUp ? 4 : 30),
-          child: Column(
-            children: [
-              PillButton('Start it', onTap: _ready ? _create : null),
-              if (!keyboardUp)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Text('No money moves through Mull.', style: ranade(11.5, color: c.ink3)),
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
+/// The group creation flow lives in `create_group_flow.dart` now: naming a
+/// thing and deciding who is in it are two questions, and a sheet that asks
+/// both at once is a form.
 
 // ------------------------------------------------------------- add an expense
 
@@ -474,7 +283,7 @@ class _ExpenseSheetState extends State<_ExpenseSheet> {
                     onTap: () => setState(() => _repeats = !_repeats),
                     help:
                         'Rent, wifi, the maid. Mull puts it on a schedule and asks '
-                        'when it comes round — it never adds one behind your back '
+                        'when it comes round. It never adds one behind your back '
                         'unless you tell it to.',
                   ),
                   if (_repeats) ...[
@@ -495,7 +304,7 @@ class _ExpenseSheetState extends State<_ExpenseSheet> {
           ),
         ),
         Padding(
-          padding: EdgeInsets.fromLTRB(26, 8, 26, keyboardUp ? 4 : 30),
+          padding: EdgeInsets.fromLTRB(20, 8, 20, keyboardUp ? 4 : 30),
           child: PillButton(widget.existing == null ? 'Add it' : 'Save', onTap: _valid ? _save : null),
         ),
       ],
@@ -608,7 +417,7 @@ class _SettleSheet extends StatelessWidget {
 
     Future<void> remind() async {
       final message = [
-        'Hey ${store.shortName(from)} — ${inr(transfer.amount)} for ${group.title} '
+        'Hey ${store.shortName(from)}, ${inr(transfer.amount)} for ${group.title} '
             'when you get a chance.',
         if (store.profile.upiId != null) 'My UPI is ${store.profile.upiId}.',
       ].join(' ');
@@ -629,21 +438,30 @@ class _SettleSheet extends StatelessWidget {
           Text(inr(transfer.amount), style: excon(44, tracking: -.03, color: c.ink)),
           const SizedBox(height: 8),
           Text(
-            youPay
-                ? 'To ${to.name}${payee.upiId == null ? '' : ' · ${payee.upiId}'}'
-                : 'Mull just keeps the record — the money moves between them.',
+            switch (null) {
+              _ when youPay => 'To ${to.name}${payee.upiId == null ? '' : ' · ${payee.upiId}'}',
+              // Money coming to you is the case the old copy got wrong: it is
+              // not "between them", it is between them and you.
+              _ when owedToYou && !from.isLinked =>
+                '${store.shortName(from)} is not on Mull. Settle in person, then '
+                    'mark it here.',
+              _ when owedToYou =>
+                'They pay you straight over UPI. Mark it here once it lands, or '
+                    'wait for them to say they have sent it.',
+              _ => 'Mull just keeps the record. The money moves between them.',
+            },
             style: ranade(13, height: 1.5, color: c.ink3),
           ),
           const SizedBox(height: 22),
           if (youPay && payee.upiId != null) ...[
             PillButton('Pay ${inr(transfer.amount)} over UPI', onTap: payOverUpi),
             const SizedBox(height: 8),
-            GhostButton('Already paid — just record it', onTap: record),
+            SecondaryButton('Already paid, just record it', onTap: record),
           ] else ...[
             PillButton('Mark as settled', onTap: record),
             if (youPay) ...[
               const SizedBox(height: 8),
-              GhostButton(
+              SecondaryButton(
                 'Add their UPI ID',
                 onTap: () {
                   Navigator.of(context).pop();
@@ -655,7 +473,7 @@ class _SettleSheet extends StatelessWidget {
             // Mull can actually help with when the money is coming to you.
             if (owedToYou) ...[
               const SizedBox(height: 8),
-              GhostButton('Remind ${store.shortName(from)}', onTap: remind),
+              SecondaryButton('Remind ${store.shortName(from)}', onTap: remind),
             ],
           ],
         ],
@@ -715,7 +533,7 @@ Future<void> showReceiptSettle(
             },
           ),
           const SizedBox(height: 8),
-          GhostButton('Not this one', onTap: () => Navigator.of(sheet).pop()),
+          SecondaryButton('Not this one', onTap: () => Navigator.of(sheet).pop()),
         ],
       ),
     ),
@@ -750,7 +568,7 @@ Future<void> _confirmPaid(BuildContext context, Group group, Transfer transfer) 
             },
           ),
           const SizedBox(height: 8),
-          GhostButton('Not yet', onTap: () => Navigator.of(sheet).pop()),
+          SecondaryButton('Not yet', onTap: () => Navigator.of(sheet).pop()),
         ],
       ),
     ),
@@ -802,7 +620,7 @@ Future<void> showClaimCheck(BuildContext context, Group group, Settlement settle
             },
           ),
           const SizedBox(height: 8),
-          GhostButton(
+          SecondaryButton(
             "It hasn't",
             onTap: () {
               store.disputeSettlement(group, settlement);
@@ -905,8 +723,8 @@ class _MemberSheetState extends State<_MemberSheet> {
                     help: Text(
                       widget.member.isLinked
                           ? 'They are on Mull and see this group.'
-                          : 'Invite them here and this seat becomes theirs the moment they sign up — '
-                                'with everything they already owe or are owed.',
+                          : 'Invite them here and this seat becomes theirs the moment they '
+                                'sign up, with everything they already owe or are owed.',
                       style: ranade(12, height: 1.5, color: c.ink3),
                     ),
                   ),
@@ -953,7 +771,7 @@ class _MemberSheetState extends State<_MemberSheet> {
                           ? (widget.member.isYou
                                 ? 'Goes into the summaries you send, so people can pay you back.'
                                 : 'Settling up opens GPay or PhonePe with the amount already filled in.')
-                          : "That doesn't look like a UPI ID — they usually read name@bank.",
+                          : "That doesn't look like a UPI ID. They usually read name@bank.",
                       style: ranade(12, height: 1.5, color: c.ink3),
                     ),
                   ),
@@ -962,7 +780,7 @@ class _MemberSheetState extends State<_MemberSheet> {
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(26, 8, 26, 30),
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
           child: PillButton('Save', onTap: looksRight ? _save : null),
         ),
       ],
@@ -1017,13 +835,13 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
             Text(
               group.isSettled
                   ? 'Every expense goes with it.'
-                  : 'Every expense goes with it — and this one is not settled up yet.',
+                  : 'Every expense goes with it, and this one is not settled up yet.',
               style: ranade(14, height: 1.6, color: sheet.c.ink3),
             ),
             const SizedBox(height: 24),
             PillButton('Delete it', onTap: () => Navigator.of(sheet).pop(true)),
             const SizedBox(height: 8),
-            GhostButton('Keep it', onTap: () => Navigator.of(sheet).pop(false)),
+            SecondaryButton('Keep it', onTap: () => Navigator.of(sheet).pop(false)),
           ],
         ),
       ),
@@ -1081,7 +899,7 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
                 ),
                 if (!group.isDirect) ...[
                   const SizedBox(height: 14),
-                  GhostButton(
+                  SecondaryButton(
                     'Add from friends',
                     onTap: () async {
                       final picked = await showFriendPicker(
@@ -1108,13 +926,13 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
                   const SizedBox(height: 12),
                   Text(
                     'A friend brings their own name and UPI ID. Someone added by hand '
-                    'is a placeholder until they join — you can fill in their details, '
+                    'is a placeholder until they join. You can fill in their details, '
                     'but a UPI ID you type yourself pays whoever owns it.',
                     style: ranade(11.5, height: 1.6, color: c.ink3),
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    'Anyone who has paid for something or owes a share stays — removing '
+                    'Anyone who has paid for something or owes a share stays. Removing '
                     'them would quietly change what everyone else owes.',
                     style: ranade(11.5, height: 1.6, color: c.ink3),
                   ),
@@ -1122,7 +940,7 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
                 const SizedBox(height: 26),
                 Eyebrow('Repeating · ${group.recurring.length}'),
                 const SizedBox(height: 12),
-                GhostButton(
+                SecondaryButton(
                   group.recurring.isEmpty ? 'Set one up' : 'Manage schedules',
                   onTap: () => showRecurringList(context, group),
                 ),
@@ -1131,10 +949,85 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(26, 8, 26, 30),
-          child: GhostButton(group.isDirect ? 'Delete this ledger' : 'Delete group', onTap: _delete),
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
+          child: SecondaryButton(group.isDirect ? 'Delete this ledger' : 'Delete group', onTap: _delete),
         ),
       ],
     );
   }
+}
+
+
+// ----------------------------------------------------------- expense actions
+
+/// Long-press on an expense: edit it, look at the schedule behind it, or take
+/// it back out of the ledger.
+Future<void> showExpenseActions(BuildContext context, Group group, Expense expense) {
+  final store = context.readStore;
+  return showMullSheet(
+    context,
+    fitContent: true,
+    builder: (sheet) {
+      void run(VoidCallback action) {
+        Navigator.of(sheet).pop();
+        Future.delayed(const Duration(milliseconds: 160), action);
+      }
+
+      final schedule = expense.recurringId == null ? null : group.recurringById(expense.recurringId!);
+
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(30, 26, 30, 22),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: Text(
+                    expense.description,
+                    style: MullType.screenTitle(sheet.c.ink),
+                    maxLines: 2,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(inr(expense.amount), style: MullType.cardAmount(sheet.c.ink)),
+              ],
+            ),
+            const SizedBox(height: 16),
+            CardRows(
+              children: [
+                SheetAction('Edit', onTap: () => run(() => showAddExpense(context, group, existing: expense))),
+                if (schedule != null)
+                  SheetAction(
+                    'The schedule behind it',
+                    detail: schedule.frequency.shortLabel,
+                    onTap: () => run(() => showRecurringEditor(context, group, existing: schedule)),
+                  )
+                else
+                  SheetAction(
+                    'Make it repeat',
+                    onTap: () => run(() => showRecurringEditor(context, group)),
+                  ),
+                SheetAction(
+                  'Delete',
+                  destructive: true,
+                  onTap: () => run(() {
+                    store.removeExpense(group, expense);
+                    Toast.show(
+                      context,
+                      'Deleted ${expense.description}',
+                      action: 'Undo',
+                      onAction: () => store.restoreExpense(group, expense),
+                    );
+                  }),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }

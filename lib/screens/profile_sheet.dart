@@ -11,6 +11,7 @@ import '../ui/sheet.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
 import 'friends_sheet.dart';
+import 'home_screen.dart' show showHowItWorks;
 
 Future<void> showProfileSheet(BuildContext context) =>
     showMullSheet(context, height: 780, builder: (_) => const _ProfileSheet());
@@ -37,7 +38,7 @@ class _AccountRowState extends State<_AccountRow> {
 
     // Signing in is the gate, so by the time anyone reaches this sheet there is
     // an account. A null email here means the session went away underneath us.
-    final email = Backend.user?.email ?? '—';
+    final email = Backend.user?.email ?? 'Not signed in';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -46,7 +47,7 @@ class _AccountRowState extends State<_AccountRow> {
         const SizedBox(height: 4),
         Text('Your groups follow the account, not this phone.', style: ranade(11.5, color: c.ink3)),
         const SizedBox(height: 12),
-        GhostButton(
+        SecondaryButton(
           'Sign out',
           onTap: () async {
             final store = context.readStore;
@@ -128,7 +129,7 @@ class _ProfileSheetState extends State<_ProfileSheet> {
           ),
           const Spacer(),
           Padding(
-            padding: const EdgeInsets.fromLTRB(26, 8, 26, 30),
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
             child: PillButton('Save', onTap: () => Navigator.of(sheet).pop(controller.text)),
           ),
         ],
@@ -162,7 +163,7 @@ class _ProfileSheetState extends State<_ProfileSheet> {
             const SizedBox(height: 24),
             PillButton('Erase everything', onTap: () => Navigator.of(sheet).pop(true)),
             const SizedBox(height: 8),
-            GhostButton('Cancel', onTap: () => Navigator.of(sheet).pop(false)),
+            SecondaryButton('Cancel', onTap: () => Navigator.of(sheet).pop(false)),
           ],
         ),
       ),
@@ -178,24 +179,6 @@ class _ProfileSheetState extends State<_ProfileSheet> {
     final c = context.c;
     final store = context.store;
     final p = store.profile;
-
-    Widget row(String label, String value, VoidCallback onTap) => Pressable(
-      onTap: onTap,
-      scale: .985,
-      child: SizedBox(
-        height: 58,
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(label, style: ranade(15.5, color: c.ink)),
-            ),
-            Text(value, style: excon(15, color: c.ink2)),
-            const SizedBox(width: 8),
-            MullIcon(MullGlyph.chevronRight, size: 16, color: c.ink3, strokeWidth: 1.7),
-          ],
-        ),
-      ),
-    );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -215,20 +198,51 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                   onChanged: (v) => store.updateProfile((p) => p.name = v.trim()),
                   help: const Text('The name people see next to your share of a bill.'),
                 ),
-                const SizedBox(height: 26),
-                CardRows(
+                const SizedBox(height: 28),
+                Stacked(
+                  gap: 8,
                   children: [
-                    row('Your UPI ID', p.upiId ?? 'Not set', _editUpi),
-                    row('Friends', _friendsLabel, () => showFriendsSheet(context)),
+                    FieldRow(
+                      label: 'Your UPI ID',
+                      value: p.upiId ?? 'Not set',
+                      onTap: _editUpi,
+                      trailing: MullIcon(
+                        MullGlyph.chevronRight,
+                        size: 14,
+                        color: c.ink2,
+                        strokeWidth: 1.8,
+                      ),
+                    ),
+                    FieldRow(
+                      label: 'Friends',
+                      value: _friendsLabel,
+                      onTap: () => showFriendsSheet(context),
+                      trailing: MullIcon(
+                        MullGlyph.chevronRight,
+                        size: 14,
+                        color: c.ink2,
+                        strokeWidth: 1.8,
+                      ),
+                    ),
+                    FieldRow(
+                      label: 'How it works',
+                      value: 'A minute',
+                      onTap: () => showHowItWorks(context),
+                      trailing: MullIcon(
+                        MullGlyph.chevronRight,
+                        size: 14,
+                        color: c.ink2,
+                        strokeWidth: 1.8,
+                      ),
+                    ),
                   ],
                 ),
-                Container(height: 1, color: c.line),
-                const SizedBox(height: 28),
-                const Eyebrow('Groups'),
-                const SizedBox(height: 10),
+                const SizedBox(height: 30),
+                const Eyebrow('Groups', size: 10.5, tracking: .18),
+                const SizedBox(height: 12),
                 const _AccountRow(),
-                const SizedBox(height: 28),
-                const Eyebrow('Appearance'),
+                const SizedBox(height: 30),
+                const Eyebrow('Appearance', size: 10.5, tracking: .18),
                 const SizedBox(height: 12),
                 Segmented(
                   labels: const ['System', 'Light', 'Dark'],
@@ -241,7 +255,7 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                 ),
                 const SizedBox(height: 28),
                 if (kDebugMode) ...[
-                  GhostButton(
+                  SecondaryButton(
                     'Load sample data',
                     onTap: () {
                       store.loadSample();
@@ -250,7 +264,7 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                   ),
                   const SizedBox(height: 8),
                 ],
-                GhostButton('Start over', onTap: _reset),
+                SecondaryButton('Start over', onTap: _reset),
               ],
             ),
           ),

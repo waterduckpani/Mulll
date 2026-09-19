@@ -6,8 +6,14 @@ import 'package:mull/main.dart';
 import 'package:mull/ui/icons.dart';
 import 'package:mull/ui/sheet.dart';
 
-/// Walks every screen with the mockup data, screenshotting each in both themes.
-/// Run: flutter drive --driver=test_driver/integration_test.dart --target=integration_test/tour_test.dart
+/// Walks every screen with the mockup data, screenshotting each one.
+///
+/// Run: flutter drive --driver=test_driver/integration_test.dart \
+///        --target=integration_test/tour_test.dart
+///
+/// Note for anyone changing this file: a target that fails to compile makes
+/// `flutter drive` silently run the *previous* build, so a green run after an
+/// edit proves nothing until `flutter analyze` is clean too.
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
@@ -18,7 +24,8 @@ void main() {
     }
   }
 
-  Finder glyph(MullGlyph g) => find.byWidgetPredicate((w) => w is MullIcon && w.glyph == g).hitTestable().last;
+  Finder glyph(MullGlyph g) =>
+      find.byWidgetPredicate((w) => w is MullIcon && w.glyph == g).hitTestable().last;
 
   Future<void> tapText(WidgetTester t, String text) async {
     await t.tap(find.text(text).hitTestable().last);
@@ -26,21 +33,23 @@ void main() {
   }
 
   Future<void> shot(WidgetTester t, String name) async {
-    await settle(t, 300);
+    await settle(t, 400);
     await Future<void>.delayed(const Duration(milliseconds: 400));
     await t.pump();
     await binding.takeScreenshot(name);
   }
 
   /// Backs out of every open sheet by tapping the scrim above them.
-  ///
-  /// Above them, not at 80pt: the tall sheets reach to within ~70pt of the top,
-  /// so the old tap landed on the sheet itself and quietly did nothing.
   Future<void> dismissSheet(WidgetTester t) async {
     for (var i = 0; i < 4 && SheetDepth.value.value > 0; i++) {
       await t.tapAt(const Offset(200, 24));
       await settle(t, 700);
     }
+  }
+
+  Future<void> back(WidgetTester t) async {
+    await t.tap(glyph(MullGlyph.chevronLeft));
+    await settle(t, 700);
   }
 
   testWidgets('tour', (t) async {
@@ -52,10 +61,10 @@ void main() {
     // The tour runs through `flutter drive`, which passes no dart-defines.
     if (find.text('Continue on this phone').evaluate().isNotEmpty) {
       await tapText(t, 'Continue on this phone');
-      await settle(t, 1200);
+      await settle(t, 1500);
     }
 
-    // ---- home, exactly as the mockup has it
+    // ---- 4A, the groups home
     await shot(t, '01-home');
 
     // ---- the claim waiting on you
@@ -63,93 +72,114 @@ void main() {
     await shot(t, '02-claim-check');
     await dismissSheet(t);
 
-    // ---- rent, due again
-    await t.tap(find.textContaining('Rent is due').hitTestable().last);
+    // ---- a schedule whose turn has come
+    await t.tap(find.text('Open it').hitTestable().first);
     await settle(t);
     await shot(t, '03-recurring-due');
     await dismissSheet(t);
 
-    // ---- a group
+    // ---- 4D, a group
     await tapText(t, 'Goa trip');
     await shot(t, '04-group-detail');
 
+    // ---- 4E, settling up, and the sheet a row opens
+    await tapText(t, 'Settle up');
+    await shot(t, '05-settle-up');
+    await tapText(t, 'Kabir pays you');
+    await shot(t, '05b-settle-sheet');
+    await dismissSheet(t);
+    await back(t);
+
+    // ---- 4F, the ledger, both tabs
+    await tapText(t, 'Ledger');
+    await shot(t, '06-ledger-expenses');
+    await tapText(t, 'Settlements');
+    await shot(t, '07-ledger-settlements');
+    await back(t);
+
+    // ---- adding an expense
     await tapText(t, 'Add an expense');
-    await t.enterText(find.byType(TextField).at(0), 'Scooter rental');
-    await t.enterText(find.byType(TextField).at(1), '2400');
+    await t.enterText(find.byType(TextField).at(0), 'Kayaking');
+    await t.enterText(find.byType(TextField).at(1), '2600');
     FocusManager.instance.primaryFocus?.unfocus();
     await settle(t);
-    await shot(t, '05-add-expense');
+    await shot(t, '08-add-expense');
     await tapText(t, 'Add it');
-    await settle(t, 800);
+    await settle(t, 900);
     expect(
       store.groups.firstWhere((g) => g.name == 'Goa trip').expenses.map((e) => e.description),
-      contains('Scooter rental'),
+      contains('Kayaking'),
     );
-    await shot(t, '06-group-after-expense');
+    await shot(t, '09-group-after-expense');
+    await back(t);
 
-    // ---- settling up, from the row that says who pays whom
-    await t.ensureVisible(find.textContaining('→').first);
-    await settle(t);
-    await t.tap(find.textContaining('→').hitTestable().first);
-    await settle(t);
-    await shot(t, '07-settle-up');
-    await dismissSheet(t);
-
-    await t.tap(glyph(MullGlyph.chevronLeft));
-    await settle(t);
-
-    // ---- the flat, where the schedules live
+    // ---- 4G, the flat, where the schedules live
     await tapText(t, 'Flat');
-    await shot(t, '08-group-with-schedules');
-    await t.ensureVisible(find.text('Manage'));
-    await settle(t);
-    await tapText(t, 'Manage');
-    await shot(t, '09-recurring-list');
-    await tapText(t, 'Wifi');
-    await shot(t, '10-recurring-editor');
+    await tapText(t, 'Recurring');
+    await shot(t, '10-recurring');
+
+    // ---- 4H, editing a standing cost
+    await tapText(t, 'Flat maintenance');
+    await shot(t, '11-recurring-editor');
     await dismissSheet(t);
-    await dismissSheet(t);
-    await t.tap(glyph(MullGlyph.chevronLeft));
-    await settle(t);
+    await back(t);
+    await back(t);
 
     // ---- chasing the people who owe you
-    await t.ensureVisible(find.text('Remind'));
-    await settle(t);
+    //
+    // A drag rather than ensureVisible: a ListView builds its children lazily,
+    // so a row below the fold is not in the tree for a finder to find yet.
+    await t.drag(find.byType(Scrollable).last, const Offset(0, -420));
+    await settle(t, 800);
     await t.tap(find.text('Remind').hitTestable().last);
     await settle(t);
-    await shot(t, '11-waiting-on');
+    await shot(t, '12-waiting-on');
     await dismissSheet(t);
 
-    // ---- starting something new
+    // ---- 4B and 4C, starting something new
     await tapText(t, 'Start a group');
-    await shot(t, '12-start-a-group');
-    await tapText(t, 'One person');
-    await shot(t, '13-split-with-someone');
-    await dismissSheet(t);
+    await settle(t, 800);
+    await shot(t, '13-name-the-group');
+    await t.enterText(find.byType(TextField).first, 'Ski trip');
+    FocusManager.instance.primaryFocus?.unfocus();
+    await settle(t);
+    await tapText(t, 'Next');
+    await settle(t, 800);
+    await shot(t, '14-whos-in');
+    await back(t);
+    await settle(t, 600);
+    await t.tap(glyph(MullGlyph.close));
+    await settle(t, 900);
 
-    // ---- the same walk again, in the dark
+    // ---- the group's own settings
+    await tapText(t, 'Goa trip');
+    await t.tap(find.bySemanticsLabel('Group settings').hitTestable().last);
+    await settle(t);
+    await shot(t, '14b-group-settings');
+    await dismissSheet(t);
+    await back(t);
+
+    // ---- the profile
     await t.tap(find.bySemanticsLabel(RegExp('^Profile and settings')).hitTestable().last);
     await settle(t);
-    await shot(t, '14-profile');
-    await tapText(t, 'Dark');
-    await shot(t, '15-profile-dark');
-    await t.tap(glyph(MullGlyph.close));
-    await settle(t);
-    await shot(t, '01d-home-dark');
-
-    await tapText(t, 'Goa trip');
-    await shot(t, '04d-group-detail-dark');
-    await tapText(t, 'Add an expense');
-    await settle(t);
-    await shot(t, '05d-add-expense-dark');
+    await shot(t, '15-profile');
+    await tapText(t, 'How Mull works');
+    await shot(t, '15b-how-it-works');
     await dismissSheet(t);
-    await t.tap(glyph(MullGlyph.chevronLeft));
+    await t.tap(find.bySemanticsLabel(RegExp('^Profile and settings')).hitTestable().last);
     await settle(t);
+    await tapText(t, 'Light');
+    await shot(t, '16-profile-light');
+    await tapText(t, 'Dark');
+    await settle(t);
+    await t.tap(glyph(MullGlyph.close));
+    await settle(t, 900);
 
-    await tapText(t, 'Flat');
-    await t.ensureVisible(find.text('Manage'));
-    await settle(t);
-    await tapText(t, 'Manage');
-    await shot(t, '09d-recurring-list-dark');
+    // ---- and the screen an app with nothing in it shows
+    store
+      ..groups.clear()
+      ..refresh();
+    await settle(t, 1600);
+    await shot(t, '17-empty-home');
   });
 }

@@ -46,7 +46,7 @@ class GroupsSync {
     } catch (_) {
       _extended = false;
       debugPrint(
-        'mull: this project predates the recurring migration — run `supabase db push`. '
+        'mull: this project predates the recurring migration, run `supabase db push`. '
         'Groups still sync; schedules and notes stay on this phone until then.',
       );
     }
@@ -410,7 +410,7 @@ class GroupsSync {
       // reports both as 42501.
       final session = Backend.session;
       debugPrint(
-        'mull: PUSH FAILED for "${group.title}" — it is on this phone only. $e\n'
+        'mull: PUSH FAILED for "${group.title}", it is on this phone only. $e\n'
         'mull:   uid=${Backend.user?.id} hasSession=${session != null} '
         'expired=${session?.isExpired} expiresAt=${session?.expiresAt}',
       );

@@ -382,26 +382,45 @@ void main() {
       expect(s.namedGroups[1].yourBalance, 2400, reason: 'Goa trip · you get back ₹2,400');
       expect(s.namedGroups[2].yourBalance, 0, reason: 'Sunday football · settled up');
 
-      // "Sahil says he sent you ₹2,400" — a claim, so it moves nothing yet.
+      // One person ledger, square, so the PEOPLE section has something in it.
+      expect(s.directLedgers.map((g) => g.title), ['Ritu Nair']);
+      expect(s.directLedgers.single.yourBalance, 0);
+
+      // "Sahil says they sent you ₹800" — a claim, so it moves nothing yet.
       expect(s.confirmationsForYou, hasLength(1));
       final (group, claim) = s.confirmationsForYou.single;
       expect(group.title, 'Goa trip');
-      expect(claim.amount, 2400);
+      expect(claim.amount, 800);
       expect(claim.status, SettlementStatus.pending);
 
-      // And it is exactly the payment the ledger says he owes you.
-      final owed = simplify(group.balances).firstWhere((t) => t.to == group.you!.id);
-      expect(owed.amount, 2400);
-      expect(owed.from, claim.fromId);
+      // The two payments that clear the trip, exactly as the settle-up screen
+      // has them: Sahil owes what he says he has already sent, and Kabir, who
+      // is not on Mull, owes the rest.
+      final owed = simplify(group.balances);
+      expect(owed.every((t) => t.to == group.you!.id), isTrue);
+      expect(owed.map((t) => t.amount).toList()..sort(), [800, 1600]);
+      expect(owed.any((t) => t.from == claim.fromId && t.amount == claim.amount), isTrue);
+      expect(
+        group.members.where((m) => !m.isLinked && !m.isYou).map((m) => m.name),
+        ['Kabir'],
+        reason: 'one seat belongs to somebody who has never heard of Mull',
+      );
+
+      // The villa deposit was paid off in full, so the ledger stops asking
+      // about it without hiding it.
+      expect(
+        group.expenses.where((e) => s.settledExpenses(group).contains(e.id)).map((e) => e.description),
+        ['Deposit for the villa'],
+      );
 
       // Every ledger balances to zero, or money has gone missing.
       for (final g in s.groups) {
         expect(g.balances.values.fold(0, (a, b) => a + b), 0, reason: g.title);
       }
 
-      // Rent is due today; wifi is not yet.
-      expect(s.dueRecurring.map((d) => d.$2.description), ['Rent']);
-      expect(s.upcomingRecurring.map((d) => d.$2.description), ['Wifi']);
+      // The house help is due today; the maintenance is not yet.
+      expect(s.dueRecurring.map((d) => d.$2.description), ['House help']);
+      expect(s.upcomingRecurring.map((d) => d.$2.description), ['Flat maintenance']);
       expect(s.runAutoRecurring(), isEmpty, reason: 'nothing adds itself without being told to');
     });
   });

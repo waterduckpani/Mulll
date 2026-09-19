@@ -180,7 +180,7 @@ class SplitFields extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Eyebrow(payerLabel),
+            Eyebrow(payerLabel, size: 10.5, tracking: .18),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
@@ -195,7 +195,7 @@ class SplitFields extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 26),
-            const Eyebrow('Split'),
+            const Eyebrow('Split', size: 10.5, tracking: .18),
             const SizedBox(height: 12),
             Segmented(
               labels: const ['Equally', 'Exact', 'Shares', '%'],
@@ -285,8 +285,8 @@ class _SplitRow extends StatelessWidget {
                           ? '0%'
                           : (method == SplitMethod.shares ? '0' : '₹0'),
                       hintStyle: excon(17, color: c.ink3.withValues(alpha: .6)),
-                      border: UnderlineInputBorder(borderSide: BorderSide(color: c.line)),
-                      enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: c.line)),
+                      border: UnderlineInputBorder(borderSide: BorderSide(color: c.inputLine)),
+                      enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: c.inputLine)),
                       focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: c.ink2)),
                       contentPadding: const EdgeInsets.only(bottom: 6),
                     ),
@@ -295,7 +295,7 @@ class _SplitRow extends StatelessWidget {
               SizedBox(
                 width: 92,
                 child: Text(
-                  share == null ? '—' : inr(share!),
+                  share == null ? '·' : inr(share!),
                   textAlign: TextAlign.right,
                   style: excon(17, color: share == null ? c.ink3 : c.ink),
                 ),
@@ -308,7 +308,11 @@ class _SplitRow extends StatelessWidget {
   }
 }
 
-/// The square tick used wherever something is in or out.
+/// The tick used wherever something is in or out.
+///
+/// A filled circle with no outline, the same mark the selection rows use: the
+/// design has no borders anywhere, so an empty one is a faint disc rather than
+/// a ring drawn in a line.
 class Checkbox24 extends StatelessWidget {
   const Checkbox24({super.key, required this.on});
 
@@ -319,14 +323,14 @@ class Checkbox24 extends StatelessWidget {
     final c = context.c;
     return AnimatedContainer(
       duration: motion(context, const Duration(milliseconds: 180)),
-      width: 22,
-      height: 22,
+      width: 26,
+      height: 26,
+      alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: on ? c.pill : c.pill.withValues(alpha: 0),
-        borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: on ? c.pill : c.line),
+        color: on ? c.ink : c.ink.withValues(alpha: .1),
+        shape: BoxShape.circle,
       ),
-      child: on ? Center(child: MullIcon(MullGlyph.check, size: 13, color: c.pillInk, strokeWidth: 2.2)) : null,
+      child: on ? MullIcon(MullGlyph.check, size: 13, color: c.screen, strokeWidth: 2.6) : null,
     );
   }
 }

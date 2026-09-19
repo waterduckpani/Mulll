@@ -1,5 +1,3 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -84,63 +82,62 @@ class _PressableState extends State<Pressable> {
   }
 }
 
-// ---------------------------------------------------------------------- glass
+// ------------------------------------------------------------------- surfaces
 
-class Glass extends StatelessWidget {
-  const Glass({
+/// Any floating object. A fill and a shadow, never a border.
+///
+/// [lift] is the whole hierarchy: exactly one [Lift.focal] per screen,
+/// [Lift.card] for the ordinary ones, [Lift.flat] for anything that should
+/// sink back into the page.
+class Surface extends StatelessWidget {
+  const Surface({
     super.key,
     required this.child,
-    this.radius = 32,
+    this.lift = Lift.card,
+    this.radius = 26,
     this.padding = EdgeInsets.zero,
     this.margin = EdgeInsets.zero,
-    this.blur = 0,
   });
 
   final Widget child;
+  final Lift lift;
   final double radius;
   final EdgeInsetsGeometry padding;
   final EdgeInsetsGeometry margin;
 
-  /// Real backdrop blur is reserved for surfaces that float over moving content.
-  final double blur;
-
   @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    final shape = BorderRadius.circular(radius);
-    Widget box = DecoratedBox(
-      decoration: BoxDecoration(
-        color: c.glass,
-        borderRadius: shape,
-        border: Border.all(color: c.glassBorder),
-        boxShadow: c.isDark ? null : const [BoxShadow(color: Color(0x0A000000), blurRadius: 28, offset: Offset(0, 10))],
-      ),
+  Widget build(BuildContext context) => Padding(
+    padding: margin,
+    child: DecoratedBox(
+      decoration: surfaceOf(context.c, lift, radius: BorderRadius.circular(radius)),
       child: Padding(padding: padding, child: child),
-    );
-    if (blur > 0) {
-      box = ClipRRect(
-        borderRadius: shape,
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-          child: box,
-        ),
-      );
-    }
-    return Padding(padding: margin, child: box);
-  }
+    ),
+  );
 }
 
 // -------------------------------------------------------------------- buttons
 
+/// The one light-filled button at the foot of a screen.
 class PillButton extends StatelessWidget {
-  const PillButton(this.label, {super.key, this.onTap, this.busy = false, this.glyph});
+  const PillButton(
+    this.label, {
+    super.key,
+    this.onTap,
+    this.busy = false,
+    this.glyph,
+    this.glyphTrailing = false,
+  });
 
   final String label;
   final VoidCallback? onTap;
   final bool busy;
 
-  /// Optional leading mark — the "+" on "Start a group".
+  /// Optional mark: the "+" on "Start a group", the "›" on "Next".
   final MullGlyph? glyph;
+
+  /// Puts [glyph] after the label rather than before it. A plus belongs in
+  /// front of what it adds; an arrow belongs after what it moves on from.
+  final bool glyphTrailing;
 
   @override
   Widget build(BuildContext context) {
@@ -153,9 +150,19 @@ class PillButton extends StatelessWidget {
         opacity: enabled || busy ? 1 : .32,
         duration: const Duration(milliseconds: 200),
         child: Container(
-          height: 60,
+          height: 58,
           alignment: Alignment.center,
-          decoration: BoxDecoration(color: c.pill, borderRadius: BorderRadius.circular(30)),
+          decoration: BoxDecoration(
+            color: c.pill,
+            borderRadius: BorderRadius.circular(29),
+            boxShadow: [
+              BoxShadow(
+                color: c.isDark ? const Color(0x99000000) : const Color(0x26131211),
+                blurRadius: 35,
+                offset: const Offset(0, 17),
+              ),
+            ],
+          ),
           child: busy
               ? SizedBox.square(
                   dimension: 18,
@@ -164,11 +171,15 @@ class PillButton extends StatelessWidget {
               : Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (glyph != null) ...[
-                      MullIcon(glyph!, size: 19, color: c.pillInk, strokeWidth: 1.9),
-                      const SizedBox(width: 12),
+                    if (glyph != null && !glyphTrailing) ...[
+                      MullIcon(glyph!, size: 17, color: c.pillInk, strokeWidth: 1.8),
+                      const SizedBox(width: 9),
                     ],
-                    Text(label, style: ranade(15.5, color: c.pillInk)),
+                    Text(label, style: MullType.button(c.pillInk)),
+                    if (glyph != null && glyphTrailing) ...[
+                      const SizedBox(width: 9),
+                      MullIcon(glyph!, size: 17, color: c.pillInk, strokeWidth: 1.8),
+                    ],
                   ],
                 ),
         ),
@@ -177,11 +188,14 @@ class PillButton extends StatelessWidget {
   }
 }
 
-class GhostButton extends StatelessWidget {
-  const GhostButton(this.label, {super.key, this.onTap});
+/// Same geometry as [PillButton], but a floating card rather than the inverse
+/// fill. Used where a screen offers a second thing to do.
+class SecondaryButton extends StatelessWidget {
+  const SecondaryButton(this.label, {super.key, this.onTap, this.glyph});
 
   final String label;
   final VoidCallback? onTap;
+  final MullGlyph? glyph;
 
   @override
   Widget build(BuildContext context) {
@@ -189,48 +203,122 @@ class GhostButton extends StatelessWidget {
     return Pressable(
       onTap: onTap,
       scale: .98,
-      child: Container(
-        height: 56,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(28),
-          border: Border.all(color: c.line),
+      child: AnimatedOpacity(
+        opacity: onTap == null ? .32 : 1,
+        duration: const Duration(milliseconds: 200),
+        child: Container(
+          height: 58,
+          alignment: Alignment.center,
+          decoration: surfaceOf(c, Lift.card, radius: BorderRadius.circular(29)),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (glyph != null) ...[
+                MullIcon(glyph!, size: 17, color: c.ink, strokeWidth: 1.8),
+                const SizedBox(width: 9),
+              ],
+              Text(label, style: MullType.button(c.ink)),
+            ],
+          ),
         ),
-        child: Text(label, style: ranade(15, color: c.ink2)),
       ),
     );
   }
 }
 
-/// Small glass capsule — "Adjust budget".
-class ChipButton extends StatelessWidget {
-  const ChipButton(this.label, {super.key, this.onTap});
+/// The short capsule that sits inside a card: "Check", "Pay my share".
+class InlineButton extends StatelessWidget {
+  const InlineButton(
+    this.label, {
+    super.key,
+    this.onTap,
+    this.filled = true,
+    this.height = 40,
+    this.expand = false,
+  });
 
   final String label;
   final VoidCallback? onTap;
+  final bool filled;
+  final double height;
+
+  /// A 48px inset button stretched across a focal card, rather than a capsule
+  /// hugging its own label.
+  final bool expand;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final radius = BorderRadius.circular(height / 2);
+    return Pressable(
+      onTap: onTap,
+      scale: .96,
+      child: AnimatedOpacity(
+        opacity: onTap == null ? .32 : 1,
+        duration: const Duration(milliseconds: 200),
+        child: Container(
+          height: height,
+          width: expand ? double.infinity : null,
+          padding: expand ? null : const EdgeInsets.symmetric(horizontal: 22),
+          alignment: Alignment.center,
+          decoration: filled
+              ? BoxDecoration(color: c.pill, borderRadius: radius)
+              : surfaceOf(c, Lift.card, radius: radius),
+          child: Text(
+            label,
+            style: MullType.button(filled ? c.pillInk : c.ink, size: height >= 48 ? 14.5 : 13.5),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 38px capsule in a row of suggestions.
+class ChipButton extends StatelessWidget {
+  const ChipButton(this.label, {super.key, this.onTap, this.selected = false});
+
+  final String label;
+  final VoidCallback? onTap;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
     final c = context.c;
     return Pressable(
       onTap: onTap,
-      child: Container(
-        height: 40,
-        padding: const EdgeInsets.symmetric(horizontal: 18),
-        alignment: Alignment.center,
+      scale: .95,
+      // No `alignment:` here. A Container with one set expands to fill loose
+      // constraints, which inside a Wrap means every chip takes the whole row
+      // and the row of suggestions becomes a stack of full-width buttons.
+      child: AnimatedContainer(
+        duration: motion(context, const Duration(milliseconds: 200)),
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 15),
         decoration: BoxDecoration(
-          color: c.glass,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: c.glassBorder),
+          color: selected ? c.pill : c.quiet,
+          borderRadius: BorderRadius.circular(19),
         ),
-        child: Text(label, style: ranade(13, color: c.ink)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(label, style: ranade(13, color: selected ? c.pillInk : c.ink2)),
+          ],
+        ),
       ),
     );
   }
 }
 
+/// 44px circular icon button. Stays 44px even when the glyph inside is 18px.
 class CircleButton extends StatelessWidget {
-  const CircleButton({super.key, required this.child, this.onTap, this.semanticLabel, this.filled = true});
+  const CircleButton({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.semanticLabel,
+    this.filled = true,
+  });
 
   final Widget child;
   final VoidCallback? onTap;
@@ -248,13 +336,7 @@ class CircleButton extends StatelessWidget {
         width: 44,
         height: 44,
         alignment: Alignment.center,
-        decoration: filled
-            ? BoxDecoration(
-                color: c.glass,
-                shape: BoxShape.circle,
-                border: Border.all(color: c.glassBorder),
-              )
-            : null,
+        decoration: filled ? surfaceOf(c, Lift.low, radius: BorderRadius.circular(22)) : null,
         child: child,
       ),
     );
@@ -270,31 +352,71 @@ class BackButtonCircle extends StatelessWidget {
   Widget build(BuildContext context) => CircleButton(
     semanticLabel: 'Back',
     onTap: onTap ?? () => Navigator.of(context).maybePop(),
-    child: MullIcon(MullGlyph.chevronLeft, color: context.c.ink, strokeWidth: 1.7),
+    child: MullIcon(MullGlyph.chevronLeft, size: 17, color: context.c.ink, strokeWidth: 1.8),
+  );
+}
+
+class CloseButtonCircle extends StatelessWidget {
+  const CloseButtonCircle({super.key, this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => CircleButton(
+    semanticLabel: 'Close',
+    onTap: onTap ?? () => Navigator.of(context).maybePop(),
+    child: MullIcon(MullGlyph.close, size: 17, color: context.c.ink, strokeWidth: 1.8),
   );
 }
 
 // --------------------------------------------------------------------- labels
 
 class Eyebrow extends StatelessWidget {
-  const Eyebrow(this.text, {super.key, this.padding = EdgeInsets.zero, this.size = 11, this.tracking = .16});
+  const Eyebrow(
+    this.text, {
+    super.key,
+    this.padding = EdgeInsets.zero,
+    this.size = 11,
+    this.tracking = .17,
+    this.color,
+  });
 
   final String text;
   final EdgeInsetsGeometry padding;
   final double size;
   final double tracking;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) => Padding(
     padding: padding,
     child: Text(
       text.toUpperCase(),
-      style: eyebrow(context.c.ink3, size: size, tracking: tracking),
+      style: eyebrow(color ?? context.c.ink3, size: size, tracking: tracking),
     ),
   );
 }
 
-/// Wordmark + profile — present on every tab.
+/// Centred, quiet, sits directly above the primary button or at the base of a
+/// list.
+class Footnote extends StatelessWidget {
+  const Footnote(this.text, {super.key, this.padding = EdgeInsets.zero});
+
+  final String text;
+  final EdgeInsetsGeometry padding;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: padding,
+    child: Text(
+      text,
+      textAlign: TextAlign.center,
+      style: MullType.caption(context.c.ink3),
+    ),
+  );
+}
+
+/// Wordmark on the left, avatar on the right. The home screen's top bar.
 class BrandBar extends StatelessWidget {
   const BrandBar({super.key, required this.initial, this.onProfile});
 
@@ -311,117 +433,28 @@ class BrandBar extends StatelessWidget {
           Semantics(
             header: true,
             label: 'Mull',
-            child: Text(
-              'mull',
-              style: TextStyle(
-                fontFamily: 'Chillax',
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-                letterSpacing: -.1,
-                height: 1,
-                color: c.ink,
-              ),
-            ),
+            child: Text('mull', style: chillax(20, color: c.ink)),
           ),
           const Spacer(),
-          CircleButton(
+          Pressable(
             onTap: onProfile,
+            scale: .92,
             semanticLabel: 'Profile and settings',
-            child: Text(initial, style: excon(15, color: c.ink)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ------------------------------------------------------------ reach & progress
-
-/// "BUDGET STOPS HERE" — the dashed reach line.
-class ReachLine extends StatelessWidget {
-  const ReachLine(this.label, {super.key});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    Widget dash() => Expanded(
-      child: CustomPaint(size: const Size.fromHeight(1), painter: _DashPainter(c.line)),
-    );
-    return Semantics(
-      label: label,
-      child: Row(
-        children: [
-          dash(),
-          const SizedBox(width: 10),
-          Text(label.toUpperCase(), style: eyebrow(c.ink3, size: 9, tracking: .18)),
-          const SizedBox(width: 10),
-          dash(),
-        ],
-      ),
-    );
-  }
-}
-
-class _DashPainter extends CustomPainter {
-  _DashPainter(this.color);
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final p = Paint()
-      ..color = color
-      ..strokeWidth = 1;
-    for (double x = 0; x < size.width; x += 6) {
-      canvas.drawLine(Offset(x, .5), Offset((x + 3).clamp(0, size.width), .5), p);
-    }
-  }
-
-  @override
-  bool shouldRepaint(_DashPainter old) => old.color != color;
-}
-
-/// Thin track with an animated fill.
-class ProgressTrack extends StatelessWidget {
-  const ProgressTrack({
-    super.key,
-    required this.value,
-    this.height = 4,
-    this.delay = Duration.zero,
-    this.fromZero = false,
-  });
-
-  final double value;
-  final double height;
-  final Duration delay;
-  final bool fromZero;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    final v = value.isNaN ? 0.0 : value.clamp(0.0, 1.0);
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(height / 2),
-      child: Container(
-        height: height,
-        color: c.line,
-        child: TweenAnimationBuilder<double>(
-          tween: Tween(begin: fromZero ? 0 : v, end: v),
-          duration: motion(context, fromZero ? const Duration(milliseconds: 1100) : const Duration(milliseconds: 550)),
-          curve: Curves.easeOutCubic,
-          builder: (context, t, _) => FractionallySizedBox(
-            alignment: Alignment.centerLeft,
-            widthFactor: t,
-            child: DecoratedBox(
-              decoration: BoxDecoration(color: c.ink, borderRadius: BorderRadius.circular(height / 2)),
+            child: Container(
+              width: 40,
+              height: 40,
+              alignment: Alignment.center,
+              decoration: surfaceOf(c, Lift.low, radius: BorderRadius.circular(20)),
+              child: Text(initial, style: ranade(14.5, color: c.ink2)),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
 }
+
+// ------------------------------------------------------------------- numerals
 
 /// Number that rolls to its new value.
 class AnimatedAmount extends StatelessWidget {
@@ -447,28 +480,34 @@ class AnimatedAmount extends StatelessWidget {
   }
 }
 
-/// A row divider matching `border-bottom: 1px solid var(--line)`.
+/// A 1px divider at the list weight.
 class Hairline extends StatelessWidget {
-  const Hairline({super.key});
+  const Hairline({super.key, this.color});
+
+  final Color? color;
 
   @override
-  Widget build(BuildContext context) => Container(height: 1, color: context.c.line);
+  Widget build(BuildContext context) =>
+      Container(height: 1, color: color ?? context.c.line);
 }
 
 // ---------------------------------------------------------------- backgrounds
 
-class BlobSpec {
-  const BlobSpec(this.size, this.blur, {this.top, this.left, this.right, this.bottom});
+/// One soft radial wash per screen, offset off a top corner.
+class GlowSpec {
+  const GlowSpec({this.size = 440, this.top = -150, this.left, this.right = -140});
+
   final double size;
-  final double blur;
-  final double? top, left, right, bottom;
+  final double? top;
+  final double? left;
+  final double? right;
 }
 
-/// Soft blurred circles that give the glass something to sit on.
+/// Flat background plus the screen's single glow.
 class Backdrop extends StatelessWidget {
-  const Backdrop({super.key, required this.blobs});
+  const Backdrop({super.key, this.glow = const GlowSpec()});
 
-  final List<BlobSpec> blobs;
+  final GlowSpec glow;
 
   @override
   Widget build(BuildContext context) {
@@ -479,26 +518,24 @@ class Backdrop extends StatelessWidget {
         child: Stack(
           clipBehavior: Clip.hardEdge,
           children: [
-            for (final b in blobs)
-              Positioned(
-                top: b.top == null ? null : b.top! - b.blur * 1.5,
-                left: b.left == null ? null : b.left! - b.blur * 1.5,
-                right: b.right == null ? null : b.right! - b.blur * 1.5,
-                bottom: b.bottom == null ? null : b.bottom! - b.blur * 1.5,
-                child: IgnorePointer(
-                  child: ImageFiltered(
-                    imageFilter: ImageFilter.blur(sigmaX: b.blur / 2, sigmaY: b.blur / 2, tileMode: TileMode.decal),
-                    child: Padding(
-                      padding: EdgeInsets.all(b.blur * 1.5),
-                      child: Container(
-                        width: b.size,
-                        height: b.size,
-                        decoration: BoxDecoration(color: c.blob, shape: BoxShape.circle),
-                      ),
+            Positioned(
+              top: glow.top,
+              left: glow.left,
+              right: glow.right,
+              child: IgnorePointer(
+                child: Container(
+                  width: glow.size,
+                  height: glow.size,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [c.glow, c.glow.withValues(alpha: 0)],
+                      stops: const [0, .7],
                     ),
                   ),
                 ),
               ),
+            ),
           ],
         ),
       ),
@@ -508,57 +545,95 @@ class Backdrop extends StatelessWidget {
 
 // ---------------------------------------------------------------- selection
 
-/// Two big tiles — Need / Want, Declared / Settled.
-class ChoicePair<T> extends StatelessWidget {
-  const ChoicePair({super.key, required this.options, required this.value, required this.onChanged, this.height = 64});
+/// A person being picked into a group.
+///
+/// Selected is the raised gradient with a filled check; unselected sinks flat
+/// with an empty ring. No tick colour, no accent: only the lift changes.
+class SelectionRow extends StatelessWidget {
+  const SelectionRow({
+    super.key,
+    required this.label,
+    required this.selected,
+    this.detail,
+    this.onTap,
+  });
 
-  final List<(T, String)> options;
-  final T? value;
-  final ValueChanged<T> onChanged;
-  final double height;
+  final String label;
+  final String? detail;
+  final bool selected;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = context.c;
-    return Row(
-      children: [
-        for (var i = 0; i < options.length; i++) ...[
-          if (i > 0) const SizedBox(width: 12),
-          Expanded(
-            child: Pressable(
-              onTap: () => onChanged(options[i].$1),
-              scale: .96,
-              semanticLabel: options[i].$2,
-              child: AnimatedContainer(
-                duration: motion(context, const Duration(milliseconds: 220)),
-                curve: Curves.easeOutCubic,
-                height: height,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: value == options[i].$1 ? c.pill : c.pill.withValues(alpha: 0),
-                  borderRadius: BorderRadius.circular(26),
-                  border: Border.all(color: value == options[i].$1 ? c.pill : c.line),
-                ),
-                child: AnimatedDefaultTextStyle(
-                  duration: motion(context, const Duration(milliseconds: 220)),
-                  style: ranade(16, color: value == options[i].$1 ? c.pillInk : c.ink2),
-                  child: Text(options[i].$2),
-                ),
+    return Pressable(
+      onTap: onTap,
+      scale: .985,
+      semanticLabel: '$label, ${selected ? 'selected' : 'not selected'}',
+      child: AnimatedContainer(
+        duration: motion(context, const Duration(milliseconds: 220)),
+        curve: Curves.easeOutCubic,
+        padding: const EdgeInsets.fromLTRB(24, 20, 20, 20),
+        decoration: surfaceOf(
+          c,
+          selected ? Lift.card : Lift.flat,
+          radius: BorderRadius.circular(24),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: ranade(16, color: selected ? c.ink : c.ink2),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (detail != null) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      detail!,
+                      style: MullType.caption(c.ink3, size: 11.5),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ],
               ),
             ),
-          ),
-        ],
-      ],
+            const SizedBox(width: 12),
+            AnimatedContainer(
+              duration: motion(context, const Duration(milliseconds: 220)),
+              width: 26,
+              height: 26,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: selected ? c.ink : c.ink.withValues(alpha: .1),
+              ),
+              child: selected
+                  ? MullIcon(MullGlyph.check, size: 13, color: c.screen, strokeWidth: 2.6)
+                  : null,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
 
-/// Glass segmented control with a sliding pill ("Needs 4 | Wants 7").
+/// Two equal segments with a sliding light thumb.
 class Segmented extends StatelessWidget {
-  const Segmented({super.key, required this.labels, required this.index, required this.onChanged, this.counts});
+  const Segmented({
+    super.key,
+    required this.labels,
+    required this.index,
+    required this.onChanged,
+  });
 
   final List<String> labels;
-  final List<int>? counts;
   final int index;
   final ValueChanged<int> onChanged;
 
@@ -569,15 +644,14 @@ class Segmented extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(5),
       decoration: BoxDecoration(
-        color: c.glass,
-        borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: c.glassBorder),
+        color: c.quiet,
+        borderRadius: BorderRadius.circular(22),
       ),
       child: SizedBox(
-        height: 44,
+        height: 38,
         child: LayoutBuilder(
           builder: (context, box) {
-            final gap = 4.0;
+            const gap = 4.0;
             final w = (box.maxWidth - gap * (labels.length - 1)) / labels.length;
             return Stack(
               children: [
@@ -589,13 +663,16 @@ class Segmented extends StatelessWidget {
                   bottom: 0,
                   width: w,
                   child: DecoratedBox(
-                    decoration: BoxDecoration(color: c.pill, borderRadius: BorderRadius.circular(22)),
+                    decoration: BoxDecoration(
+                      color: c.pill,
+                      borderRadius: BorderRadius.circular(19),
+                    ),
                   ),
                 ),
                 Row(
                   children: [
                     for (var i = 0; i < labels.length; i++) ...[
-                      if (i > 0) SizedBox(width: gap),
+                      if (i > 0) const SizedBox(width: gap),
                       SizedBox(
                         width: w,
                         child: GestureDetector(
@@ -611,17 +688,8 @@ class Segmented extends StatelessWidget {
                             child: Center(
                               child: AnimatedDefaultTextStyle(
                                 duration: d,
-                                style: ranade(14.5, color: i == index ? c.pillInk : c.ink3),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text(labels[i]),
-                                    if (counts != null) ...[
-                                      const SizedBox(width: 7),
-                                      Text('${counts![i]}', style: excon(14.5, color: i == index ? c.pillInk : c.ink3)),
-                                    ],
-                                  ],
-                                ),
+                                style: ranade(13, color: i == index ? c.pillInk : c.ink2),
+                                child: Text(labels[i]),
                               ),
                             ),
                           ),
@@ -639,10 +707,68 @@ class Segmented extends StatelessWidget {
   }
 }
 
+/// 44 × 26 switch. On is the inverse fill.
+class MullToggle extends StatelessWidget {
+  const MullToggle({super.key, required this.value, required this.onChanged, this.semanticLabel});
+
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  final String? semanticLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final d = motion(context, const Duration(milliseconds: 220));
+    return Semantics(
+      toggled: value,
+      label: semanticLabel,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onChanged(!value);
+        },
+        child: AnimatedContainer(
+          duration: d,
+          curve: Curves.easeOutCubic,
+          width: 44,
+          height: 26,
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: value ? c.pill : c.ink.withValues(alpha: .14),
+            borderRadius: BorderRadius.circular(13),
+          ),
+          child: AnimatedAlign(
+            duration: d,
+            curve: Curves.easeOutCubic,
+            alignment: value ? Alignment.centerRight : Alignment.centerLeft,
+            child: Container(
+              width: 20,
+              height: 20,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: value ? c.pillInk : c.ink.withValues(alpha: .55),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ---------------------------------------------------------------------- chips
 
+/// A name already in the group, with an optional way to take it out again.
 class NameChip extends StatelessWidget {
-  const NameChip(this.label, {super.key, this.selected = false, this.onTap, this.onRemove, this.detail});
+  const NameChip(
+    this.label, {
+    super.key,
+    this.selected = false,
+    this.onTap,
+    this.onRemove,
+    this.detail,
+  });
 
   final String label;
   final String? detail;
@@ -658,29 +784,35 @@ class NameChip extends StatelessWidget {
       scale: .95,
       child: AnimatedContainer(
         duration: motion(context, const Duration(milliseconds: 200)),
-        height: 40,
-        padding: EdgeInsets.only(left: 16, right: onRemove == null ? 16 : 4),
+        height: 38,
+        padding: EdgeInsets.only(left: 15, right: onRemove == null ? 15 : 2),
         decoration: BoxDecoration(
-          color: selected ? c.pill : c.pill.withValues(alpha: 0),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: selected ? c.pill : c.line),
+          color: selected ? c.pill : c.quiet,
+          borderRadius: BorderRadius.circular(19),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(label, style: ranade(14, color: selected ? c.pillInk : c.ink2)),
+            Text(label, style: ranade(13, color: selected ? c.pillInk : c.ink2)),
             if (detail != null) ...[
-              const SizedBox(width: 8),
-              Text(detail!, style: excon(13, color: selected ? c.pillInk : c.ink3)),
+              const SizedBox(width: 7),
+              Text(detail!, style: excon(12.5, color: selected ? c.pillInk : c.ink3)),
             ],
             if (onRemove != null)
               GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: onRemove,
                 child: SizedBox(
-                  width: 34,
-                  height: 40,
-                  child: Center(child: MullIcon(MullGlyph.close, size: 13, color: c.ink3, strokeWidth: 2)),
+                  width: 32,
+                  height: 38,
+                  child: Center(
+                    child: MullIcon(
+                      MullGlyph.close,
+                      size: 12,
+                      color: selected ? c.pillInk : c.ink3,
+                      strokeWidth: 1.9,
+                    ),
+                  ),
                 ),
               ),
           ],
@@ -692,7 +824,7 @@ class NameChip extends StatelessWidget {
 
 // --------------------------------------------------------------------- fields
 
-/// Large underlined input (name / amount) from the quick-add sheet.
+/// Large input with no box: the value, a caret, and an underline below it.
 class BigField extends StatelessWidget {
   const BigField({
     super.key,
@@ -709,6 +841,7 @@ class BigField extends StatelessWidget {
     this.textInputAction,
     this.capitalization = TextCapitalization.sentences,
     this.keyboardType,
+    this.underline = true,
   });
 
   final TextEditingController controller;
@@ -723,9 +856,10 @@ class BigField extends StatelessWidget {
   final ValueChanged<String>? onSubmitted;
   final TextInputAction? textInputAction;
   final TextCapitalization capitalization;
+  final bool underline;
 
-  /// Overrides the keyboard the field would otherwise pick from [numeric] —
-  /// an email address wants its own, with the @ to hand.
+  /// Overrides the keyboard the field would otherwise pick from [numeric]. An
+  /// email address wants its own, with the @ to hand.
   final TextInputType? keyboardType;
 
   @override
@@ -736,10 +870,10 @@ class BigField extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(
-          padding: const EdgeInsets.only(bottom: 12),
-          decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: c.line)),
-          ),
+          padding: const EdgeInsets.only(bottom: 16),
+          decoration: underline
+              ? BoxDecoration(border: Border(bottom: BorderSide(color: c.inputLine)))
+              : null,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
@@ -751,7 +885,8 @@ class BigField extends StatelessWidget {
                   style: style,
                   cursorColor: c.ink,
                   cursorWidth: 2,
-                  cursorHeight: size * .9,
+                  cursorHeight: size,
+                  cursorRadius: Radius.zero,
                   cursorOpacityAnimates: true,
                   keyboardAppearance: c.isDark ? Brightness.dark : Brightness.light,
                   textCapitalization: numeric ? TextCapitalization.none : capitalization,
@@ -776,13 +911,82 @@ class BigField extends StatelessWidget {
         ),
         if (help != null)
           Padding(
-            padding: const EdgeInsets.only(top: 10),
+            padding: const EdgeInsets.only(top: 12),
             child: DefaultTextStyle(
-              style: ranade(12, height: 1.55, color: c.ink3),
+              style: MullType.caption(c.ink3),
               child: help!,
             ),
           ),
       ],
+    );
+  }
+}
+
+/// A labelled value with a chevron, stacked inside a sheet.
+class FieldRow extends StatelessWidget {
+  const FieldRow({
+    super.key,
+    required this.label,
+    required this.value,
+    this.onTap,
+    this.trailing,
+  });
+
+  final String label;
+  final String value;
+  final VoidCallback? onTap;
+
+  /// Replaces the chevron: a toggle, say.
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    return Pressable(
+      onTap: onTap,
+      scale: .99,
+      semanticLabel: '$label, $value',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
+        decoration: BoxDecoration(
+          color: c.quiet,
+          borderRadius: BorderRadius.circular(22),
+        ),
+        child: Row(
+          children: [
+            // Both sides are tight, one part label to two parts value. A loose
+            // value would shrink to its own text and strand the chevron in the
+            // middle of the row; the design has it hard against the edge.
+            Expanded(
+              flex: 4,
+              child: Text(
+                label,
+                style: ranade(14.5, color: c.ink2),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 5,
+              child: Text(
+                value,
+                style: ranade(15, color: c.ink),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+              ),
+            ),
+            if (trailing != null) ...[
+              const SizedBox(width: 10),
+              trailing!,
+            ] else if (onTap != null) ...[
+              const SizedBox(width: 10),
+              MullIcon(MullGlyph.chevronDown, size: 14, color: c.ink2, strokeWidth: 1.8),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
@@ -836,7 +1040,7 @@ class _MeasureRender extends RenderProxyBox {
   }
 }
 
-/// Rows inside a glass list card, separated by hairlines.
+/// Rows inside a card, separated by hairlines.
 class CardRows extends StatelessWidget {
   const CardRows({super.key, required this.children});
 
@@ -856,33 +1060,26 @@ class CardRows extends StatelessWidget {
   }
 }
 
-/// Friendly empty state inside a glass card.
-class EmptyCard extends StatelessWidget {
-  const EmptyCard({
-    super.key,
-    required this.title,
-    required this.body,
-    this.margin = const EdgeInsets.fromLTRB(22, 14, 22, 0),
-  });
+/// Cards in a stack sit 8px apart; related rows sit 2px apart so they read as
+/// one block.
+class Stacked extends StatelessWidget {
+  const Stacked({super.key, required this.children, this.gap = 8, this.padding = EdgeInsets.zero});
 
-  final String title;
-  final String body;
-  final EdgeInsetsGeometry margin;
+  final List<Widget> children;
+  final double gap;
+  final EdgeInsetsGeometry padding;
 
   @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    return Glass(
-      margin: margin,
-      padding: const EdgeInsets.fromLTRB(24, 24, 24, 26),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(title, style: excon(22, tracking: -.02, color: c.ink, height: 1.25)),
-          const SizedBox(height: 10),
-          Text(body, style: ranade(13, height: 1.6, color: c.ink3)),
+  Widget build(BuildContext context) => Padding(
+    padding: padding,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < children.length; i++) ...[
+          if (i > 0) SizedBox(height: gap),
+          children[i],
         ],
-      ),
-    );
-  }
+      ],
+    ),
+  );
 }

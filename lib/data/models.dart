@@ -502,7 +502,9 @@ class Group {
 class Profile {
   Profile({
     this.name = '',
-    this.theme = ThemeMode.system,
+    // Dark is the primary theme: every screen in the design is dark, and the
+    // paper theme is an option rather than half of a pair.
+    this.theme = ThemeMode.dark,
     this.onboarded = false,
     this.upiId,
     this.phone,
@@ -531,7 +533,7 @@ class Profile {
 
   factory Profile.fromJson(Map<String, dynamic> j) => Profile(
     name: j['name'] as String? ?? '',
-    theme: ThemeMode.values.byName(j['theme'] as String? ?? 'system'),
+    theme: ThemeMode.values.byName(j['theme'] as String? ?? 'dark'),
     onboarded: j['onboarded'] as bool? ?? false,
     upiId: j['upiId'] as String?,
     phone: j['phone'] as String?,

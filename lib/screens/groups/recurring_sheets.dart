@@ -145,7 +145,7 @@ class _DueSheetState extends State<_DueSheet> {
                   trailing: Text('this time', style: ranade(11.5, color: c.ink3)),
                   help: Text(
                     _changed
-                        ? 'Saved as the new amount — next time will ask for this instead.'
+                        ? 'Saved as the new amount. Next time will ask for this instead.'
                         : 'Rent goes up, bills move. Change it here and the schedule follows.',
                     style: ranade(12, height: 1.5, color: c.ink3),
                   ),
@@ -185,7 +185,7 @@ class _DueSheetState extends State<_DueSheet> {
           ),
         ),
         Padding(
-          padding: EdgeInsets.fromLTRB(26, 8, 26, keyboardUp ? 4 : 26),
+          padding: EdgeInsets.fromLTRB(20, 8, 20, keyboardUp ? 4 : 26),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -194,7 +194,7 @@ class _DueSheetState extends State<_DueSheet> {
                 onTap: _split.isValid ? _add : null,
               ),
               const SizedBox(height: 8),
-              GhostButton('Not this time', onTap: _skip),
+              SecondaryButton('Not this time', onTap: _skip),
             ],
           ),
         ),
@@ -269,8 +269,8 @@ class _RecurringListSheet extends StatelessWidget {
               ),
               const SizedBox(height: 14),
               Text(
-                'Everything already added stays put if you delete a schedule — '
-                'those were real payments.',
+                'Everything already added stays put if you delete a schedule, '
+                'because those were real payments.',
                 style: ranade(11.5, height: 1.6, color: c.ink3),
               ),
             ],
@@ -492,14 +492,14 @@ class _RecurringEditorState extends State<_RecurringEditor> {
             Text('Stop ${schedule.description}?', style: excon(26, tracking: -.02, color: sheet.c.ink)),
             const SizedBox(height: 10),
             Text(
-              'The schedule goes. Everything it has already added stays — that '
-              'was real money.',
+              'The schedule goes. Everything it has already added stays, because '
+              'that was real money.',
               style: ranade(14, height: 1.6, color: sheet.c.ink3),
             ),
             const SizedBox(height: 24),
             PillButton('Stop it', onTap: () => Navigator.of(sheet).pop(true)),
             const SizedBox(height: 8),
-            GhostButton('Keep it', onTap: () => Navigator.of(sheet).pop(false)),
+            SecondaryButton('Keep it', onTap: () => Navigator.of(sheet).pop(false)),
           ],
         ),
       ),
@@ -517,140 +517,259 @@ class _RecurringEditorState extends State<_RecurringEditor> {
     }
   }
 
+  /// The split, opened as its own sheet.
+  ///
+  /// It is the one part of a schedule that can take a whole screen on its own,
+  /// and burying a per-person editor inside a list of one-line field rows is
+  /// what made the old version a scroll rather than a form.
+  Future<void> _editSplit() => showMullSheet(
+    context,
+    height: 720,
+    builder: (sheet) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SheetHeader('Who pays, and how it splits'),
+        Expanded(
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(30, 14, 30, 20),
+            child: ListenableBuilder(
+              listenable: _split,
+              builder: (context, _) => SplitFields(model: _split, payerLabel: 'Who pays it'),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 6, 20, 26),
+          child: PillButton('Done', onTap: () => Navigator.of(sheet).pop()),
+        ),
+      ],
+    ),
+  );
+
+  Future<void> _pickFrequency() async {
+    final picked = await showOptionSheet<Frequency>(
+      context,
+      title: 'How often',
+      value: _frequency,
+      options: [for (final f in Frequency.values) (f, f.label, null)],
+    );
+    if (picked != null && mounted) setState(() => _frequency = picked);
+  }
+
+  /// "5th of the month" reads as a rule; "25 Sep" reads as one date.
+  String get _charges => switch (_frequency) {
+    Frequency.monthly => '${ordinal(_nextDue.day)} of the month',
+    Frequency.quarterly => '${ordinal(_nextDue.day)}, every 3 months',
+    Frequency.yearly => '${shortDate(_nextDue)}, every year',
+    _ => shortDateWithYear(_nextDue, context.readStore.now()),
+  };
+
+  String get _splitSummary {
+    final count = _split.included.length;
+    return switch (_split.method) {
+      SplitMethod.equal => 'Equally, $count ${count == 1 ? 'way' : 'ways'}',
+      SplitMethod.exact => 'Exact amounts',
+      SplitMethod.shares => 'By shares',
+      SplitMethod.percent => 'By percentage',
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.c;
     final store = context.store;
     final keyboardUp = MediaQuery.viewInsetsOf(context).bottom > 0;
+    final payer = widget.group.memberById(_split.payerId);
+    final yourShare = _split.shares[widget.group.you?.id] ?? 0;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Not the description: the field right below already says it, and
-        // a header that repeats the first line reads as a mistake.
-        SheetHeader(widget.existing == null ? 'New repeating expense' : 'Repeating expense'),
+        SheetHeader('Recurring · ${widget.group.title}'),
         Expanded(
           child: SingleChildScrollView(
             physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(30, 12, 30, 24),
+            padding: const EdgeInsets.fromLTRB(30, 14, 30, 24),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 BigField(
                   controller: _description,
                   autofocus: widget.existing == null,
-                  hint: 'Rent',
+                  hint: 'House help',
                   textInputAction: TextInputAction.next,
                   onSubmitted: (_) => _amountFocus.requestFocus(),
                 ),
-                const SizedBox(height: 22),
+                const SizedBox(height: 26),
                 BigField(
                   controller: _amount,
                   focusNode: _amountFocus,
                   numeric: true,
+                  size: 44,
                   hint: '₹0',
-                  trailing: Text('each time', style: ranade(11.5, color: c.ink3)),
+                  underline: false,
+                  trailing: Text(
+                    _frequency.label.toLowerCase(),
+                    style: MullType.caption(c.ink3),
+                  ),
                 ),
-                const SizedBox(height: 28),
-                const Eyebrow('How often'),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
+                const SizedBox(height: 22),
+
+                Stacked(
+                  gap: 8,
                   children: [
-                    for (final f in Frequency.values)
-                      NameChip(f.label, selected: f == _frequency, onTap: () => setState(() => _frequency = f)),
+                    FieldRow(
+                      label: 'Repeats',
+                      value: _frequency.label,
+                      onTap: _pickFrequency,
+                    ),
+                    FieldRow(
+                      label: widget.existing == null ? 'Starts on' : 'Charges on',
+                      value: _charges,
+                      onTap: () => _pick(isEnd: false),
+                    ),
+                    FieldRow(
+                      label: 'Paid by',
+                      value: payer == null ? 'Someone' : store.displayName(payer),
+                      onTap: _editSplit,
+                    ),
+                    FieldRow(
+                      label: 'Split',
+                      value: _splitSummary,
+                      onTap: _editSplit,
+                    ),
+                    FieldRow(
+                      label: 'Stops after',
+                      value: _endsOn == null ? 'Never' : shortDateWithYear(_endsOn!, store.now()),
+                      onTap: () => _pick(isEnd: true),
+                    ),
                   ],
                 ),
-                const SizedBox(height: 20),
-                _DateRow(
-                  label: widget.existing == null ? 'Starts' : 'Next one',
-                  value: shortDateWithYear(_nextDue, store.now()),
-                  onTap: () => _pick(isEnd: false),
+
+                if (!_split.isValid && _amount.amount != null) ...[
+                  const SizedBox(height: 14),
+                  Text(_split.status, style: MullType.caption(c.ink2)),
+                ],
+
+                const SizedBox(height: 18),
+                _ToggleCard(
+                  title: 'Open it automatically',
+                  body: yourShare > 0
+                      ? 'Everyone gets asked for their ${inr(yourShare)} on the '
+                            '${ordinal(_nextDue.day)}.'
+                      : 'Mull adds it on the day and tells everyone it did. Only '
+                            'for the ones that truly never change.',
+                  value: _autoAdd,
+                  onChanged: (v) => setState(() => _autoAdd = v),
                 ),
-                _DateRow(
-                  label: 'Stops after',
-                  value: _endsOn == null ? 'Never' : shortDateWithYear(_endsOn!, store.now()),
-                  onTap: () => _pick(isEnd: true),
-                  onClear: _endsOn == null ? null : () => setState(() => _endsOn = null),
-                ),
-                const SizedBox(height: 26),
-                SplitFields(model: _split, payerLabel: 'Who pays it'),
-                const SizedBox(height: 26),
-                CheckRow(
-                  on: _autoAdd,
-                  label: 'Add it without asking',
-                  onTap: () => setState(() => _autoAdd = !_autoAdd),
-                  help:
-                      'Only for the ones that truly never change. Mull will still '
-                      'tell you afterwards — an expense nobody was told about is an '
-                      'expense nobody checked.',
-                ),
+
                 if (widget.existing != null) ...[
-                  const SizedBox(height: 20),
-                  CheckRow(
-                    on: _paused,
-                    label: 'Pause it',
-                    onTap: () => setState(() => _paused = !_paused),
-                    help:
-                        'Keeps the schedule without it piling up. Nothing is owed '
-                        'for the time it was off.',
+                  const SizedBox(height: 8),
+                  _ToggleCard(
+                    title: 'Pause it',
+                    body: 'Keeps the schedule without it piling up. Nothing is '
+                        'owed for the time it was off.',
+                    value: _paused,
+                    onChanged: (v) => setState(() => _paused = v),
                   ),
-                  const SizedBox(height: 26),
-                  GhostButton('Stop this schedule', onTap: _delete),
+                  const SizedBox(height: 22),
+                  SecondaryButton('Stop this schedule', onTap: _delete),
                 ],
               ],
             ),
           ),
         ),
         Padding(
-          padding: EdgeInsets.fromLTRB(26, 8, 26, keyboardUp ? 4 : 30),
-          child: PillButton(widget.existing == null ? 'Set it up' : 'Save', onTap: _valid ? _save : null),
+          padding: EdgeInsets.fromLTRB(20, 6, 20, keyboardUp ? 4 : 26),
+          child: PillButton(
+            widget.existing == null ? 'Set it up' : 'Save it',
+            onTap: _valid ? _save : null,
+          ),
         ),
       ],
     );
   }
 }
 
-class _DateRow extends StatelessWidget {
-  const _DateRow({required this.label, required this.value, required this.onTap, this.onClear});
+/// A switch with the sentence that explains what it will do.
+class _ToggleCard extends StatelessWidget {
+  const _ToggleCard({
+    required this.title,
+    required this.body,
+    required this.value,
+    required this.onChanged,
+  });
 
-  final String label;
-  final String value;
-  final VoidCallback onTap;
-  final VoidCallback? onClear;
+  final String title;
+  final String body;
+  final bool value;
+  final ValueChanged<bool> onChanged;
 
   @override
   Widget build(BuildContext context) {
     final c = context.c;
-    return Pressable(
-      onTap: onTap,
-      scale: .99,
-      child: Container(
-        height: 54,
-        decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: c.line)),
-        ),
-        child: Row(
-          children: [
-            Expanded(child: Text(label, style: ranade(15, color: c.ink2))),
-            Text(value, style: excon(16, color: c.ink)),
-            const SizedBox(width: 6),
-            if (onClear != null)
-              CircleButton(
-                filled: false,
-                semanticLabel: 'Clear $label',
-                onTap: onClear,
-                child: MullIcon(MullGlyph.close, size: 15, color: c.ink3, strokeWidth: 1.8),
-              )
-            else
-              Padding(
-                padding: const EdgeInsets.only(left: 2),
-                child: MullIcon(MullGlyph.chevronRight, size: 15, color: c.ink3, strokeWidth: 1.7),
-              ),
-          ],
-        ),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(22, 18, 18, 20),
+      decoration: BoxDecoration(
+        color: c.quiet,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: MullType.cardTitle(c.ink, size: 16)),
+                const SizedBox(height: 5),
+                Text(body, style: MullType.caption(c.ink3)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 16),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: MullToggle(value: value, onChanged: onChanged, semanticLabel: title),
+          ),
+        ],
       ),
     );
   }
 }
+
+/// One choice out of a short list, in a sheet sized to the list.
+Future<T?> showOptionSheet<T>(
+  BuildContext context, {
+  required String title,
+  required T value,
+  required List<(T, String, String?)> options,
+}) => showMullSheet<T>(
+  context,
+  fitContent: true,
+  builder: (sheet) => Padding(
+    padding: const EdgeInsets.only(bottom: 24),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SheetHeader(title),
+        const SizedBox(height: 10),
+        Stacked(
+          gap: 8,
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          children: [
+            for (final (option, label, detail) in options)
+              SelectionRow(
+                label: label,
+                detail: detail,
+                selected: option == value,
+                onTap: () => Navigator.of(sheet).pop(option),
+              ),
+          ],
+        ),
+      ],
+    ),
+  ),
+);

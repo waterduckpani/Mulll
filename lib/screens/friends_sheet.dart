@@ -95,7 +95,7 @@ class _FriendsSheetState extends State<_FriendsSheet> {
                 ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(26, 8, 26, 30),
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
           child: PillButton('Add a friend', onTap: _add),
         ),
       ],
@@ -126,7 +126,7 @@ class _FriendRow extends StatelessWidget {
       // broken, it is waiting — and the person sending it should know that
       // nothing happens until the other person turns up.
       FriendState.outgoing => (
-        friend.hasAccount ? 'Asked — waiting on them' : 'Invited — waiting for them to join Mull',
+        friend.hasAccount ? 'Asked, waiting on them' : 'Invited, waiting for them to join Mull',
         null,
       ),
       FriendState.friends => (friend.upiId ?? 'No UPI ID on their account yet', null),
@@ -140,7 +140,7 @@ class _FriendRow extends StatelessWidget {
             width: 38,
             height: 38,
             alignment: Alignment.center,
-            decoration: BoxDecoration(color: c.blob, shape: BoxShape.circle),
+            decoration: BoxDecoration(color: c.quiet, shape: BoxShape.circle),
             child: Text(friend.initials, style: excon(14, color: c.ink)),
           ),
           const SizedBox(width: 14),
@@ -201,7 +201,7 @@ class _Empty extends StatelessWidget {
           Text(
             'Add the people you actually split things with. Once you are '
             'connected, putting them in a group brings their name and UPI ID '
-            'with them — no more typing someone else\'s payment details and '
+            'with them. No more typing someone else\'s payment details and '
             'hoping you got it right.',
             style: ranade(14, height: 1.7, color: c.ink3),
           ),
@@ -272,13 +272,13 @@ class _AddFriendSheetState extends State<_AddFriendSheet> {
               // say whether that address has an account, because an answer here
               // would let anyone check a list of addresses against its users.
               'We\'ve sent your request to ${_email.text.trim()}. They\'ll see it '
-              'next time they open Mull — or when they join, if they haven\'t yet.',
+              'next time they open Mull, or when they join if they haven\'t yet.',
               style: ranade(14, height: 1.7, color: c.ink3),
             ),
           ),
           const Spacer(),
           Padding(
-            padding: const EdgeInsets.fromLTRB(26, 8, 26, 30),
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
             child: PillButton('Done', onTap: () => Navigator.of(context).pop(true)),
           ),
         ],
@@ -312,7 +312,7 @@ class _AddFriendSheetState extends State<_AddFriendSheet> {
           ),
         const Spacer(),
         Padding(
-          padding: const EdgeInsets.fromLTRB(26, 8, 26, 30),
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
           child: PillButton(
             _busy ? 'Sending…' : 'Send request',
             onTap: _busy || _email.text.trim().isEmpty ? null : _send,
@@ -395,7 +395,7 @@ class _FriendPickerState extends State<_FriendPicker> {
                       Text('Nobody to add.', style: excon(24, tracking: -.02, color: c.ink)),
                       const SizedBox(height: 10),
                       Text(
-                        'Everyone you are friends with is already in this group — '
+                        'Everyone you are friends with is already in this group, '
                         'or you have not added anyone yet. You can still add a '
                         'name by hand and fill in their details later.',
                         style: ranade(14, height: 1.7, color: c.ink3),
@@ -423,7 +423,7 @@ class _FriendPickerState extends State<_FriendPicker> {
                                 height: 38,
                                 alignment: Alignment.center,
                                 decoration: BoxDecoration(
-                                  color: _picked.contains(friend.userId) ? c.pill : c.blob,
+                                  color: _picked.contains(friend.userId) ? c.pill : c.quiet,
                                   shape: BoxShape.circle,
                                 ),
                                 child: Text(
@@ -457,7 +457,7 @@ class _FriendPickerState extends State<_FriendPicker> {
                 ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(26, 8, 26, 30),
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
           child: PillButton(
             _picked.isEmpty ? 'Pick someone' : 'Add ${_picked.length}',
             onTap: _picked.isEmpty

@@ -10,6 +10,15 @@ import 'icons.dart';
 import 'tokens.dart';
 import 'widgets.dart';
 
+/// Sheet corners: 44 at the top, 54 at the bottom so they meet the screen's
+/// own radius rather than cutting across it.
+const _sheetShape = BorderRadius.only(
+  topLeft: Radius.circular(44),
+  topRight: Radius.circular(44),
+  bottomLeft: Radius.circular(54),
+  bottomRight: Radius.circular(54),
+);
+
 /// Tracks how "deep" into sheets we are so the shell can recede behind them.
 class SheetDepth {
   static final ValueNotifier<double> value = ValueNotifier(0);
@@ -32,7 +41,7 @@ class SheetDepth {
   }
 }
 
-/// Glass bottom sheet with blurred scrim, drag-to-dismiss and a receding background.
+/// Bottom sheet: blurred scrim, drag to dismiss, and the shell receding behind it.
 Future<T?> showMullSheet<T>(
   BuildContext context, {
   required WidgetBuilder builder,
@@ -141,7 +150,7 @@ class _SheetFrameState extends State<_SheetFrame> {
                 child: Opacity(
                   opacity: raw.clamp(0.0, 1.0),
                   child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 3, sigmaY: 3),
+                    filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
                     child: ColoredBox(color: c.scrim),
                   ),
                 ),
@@ -164,16 +173,24 @@ class _SheetFrameState extends State<_SheetFrame> {
         onVerticalDragEnd: _dragEnd,
         child: MeasureSize(
           onChange: (s) => _sheetHeight = max(1, s.height),
-          child: ClipRRect(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(42)),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+          child: DecoratedBox(
+            // Lifting up off the scrim is the only thing separating the sheet
+            // from what is behind it: the design has no borders to draw.
+            decoration: const BoxDecoration(
+              borderRadius: _sheetShape,
+              boxShadow: [BoxShadow(color: Color(0xB3000000), blurRadius: 70, offset: Offset(0, -30))],
+            ),
+            child: ClipRRect(
+              borderRadius: _sheetShape,
               child: Container(
                 height: route.fitContent ? null : height,
                 constraints: BoxConstraints(maxHeight: available),
                 decoration: BoxDecoration(
-                  color: c.sheet,
-                  border: Border(top: BorderSide(color: c.glassBorder)),
+                  gradient: LinearGradient(
+                    begin: const Alignment(-.07, -1),
+                    end: const Alignment(.07, 1),
+                    colors: [c.sheetTop, c.sheetBottom],
+                  ),
                 ),
                 child: MediaQuery.removeViewInsets(
                   context: context,
@@ -191,22 +208,22 @@ class _SheetFrameState extends State<_SheetFrame> {
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             Padding(
-                              padding: const EdgeInsets.only(top: 11),
+                              padding: const EdgeInsets.only(top: 12),
                               child: Center(
                                 child: Container(
                                   width: 40,
                                   height: 5,
                                   decoration: BoxDecoration(
-                                    color: c.ink.withValues(alpha: .18),
+                                    color: c.ink.withValues(alpha: .2),
                                     borderRadius: BorderRadius.circular(3),
                                   ),
                                 ),
                               ),
                             ),
                             if (route.fitContent)
-                              Flexible(child: Builder(builder: route.builder))
+                              Flexible(child: _SheetInk(builder: route.builder))
                             else
-                              Expanded(child: Builder(builder: route.builder)),
+                              Expanded(child: _SheetInk(builder: route.builder)),
                           ],
                         ),
                       ),
@@ -222,6 +239,24 @@ class _SheetFrameState extends State<_SheetFrame> {
   }
 }
 
+/// Re-themes everything inside a sheet: the faintest ink lightens and the
+/// hairlines get heavier, because the surface under them is lighter than the
+/// screen. Doing it here means no sheet has to remember.
+class _SheetInk extends StatelessWidget {
+  const _SheetInk({required this.builder});
+
+  final WidgetBuilder builder;
+
+  @override
+  Widget build(BuildContext context) {
+    final inside = context.c.insideSheet;
+    return Theme(
+      data: Theme.of(context).copyWith(extensions: [inside]),
+      child: Builder(builder: builder),
+    );
+  }
+}
+
 /// Standard sheet header: eyebrow on the left, close on the right.
 class SheetHeader extends StatelessWidget {
   const SheetHeader(this.title, {super.key, this.showClose = true});
@@ -233,18 +268,18 @@ class SheetHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.c;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(22, 14, 22, 0),
+      padding: const EdgeInsets.fromLTRB(30, 16, 20, 0),
       child: SizedBox(
         height: 44,
         child: Row(
           children: [
-            Expanded(child: Eyebrow(title, padding: const EdgeInsets.only(left: 8))),
+            Expanded(child: Eyebrow(title, size: 10.5, tracking: .18)),
             if (showClose)
               CircleButton(
                 filled: false,
                 semanticLabel: 'Close',
                 onTap: () => Navigator.of(context).maybePop(),
-                child: MullIcon(MullGlyph.close, size: 18, color: c.ink3, strokeWidth: 1.8),
+                child: MullIcon(MullGlyph.close, size: 17, color: c.ink2, strokeWidth: 1.8),
               ),
           ],
         ),
@@ -283,7 +318,7 @@ class SheetAction extends StatelessWidget {
                 ),
               ),
             ),
-            if (detail != null) Text(detail!, style: ranade(13, color: c.ink3)),
+            if (detail != null) Text(detail!, style: ranade(13.5, color: c.ink3)),
             ?trailing,
           ],
         ),
@@ -368,13 +403,18 @@ class _ToastViewState extends State<_ToastView> with SingleTickerProviderStateMi
             type: MaterialType.transparency,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(28),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(28),
+                  boxShadow: [
+                    BoxShadow(color: c.shadowCard, blurRadius: 40, offset: const Offset(0, 16)),
+                  ],
+                ),
                 child: Container(
                   height: 56,
                   padding: const EdgeInsets.only(left: 22, right: 8),
                   decoration: BoxDecoration(
-                    color: c.pill.withValues(alpha: .92),
+                    color: c.pill,
                     borderRadius: BorderRadius.circular(28),
                   ),
                   child: Row(
@@ -431,7 +471,7 @@ Future<DateTime?> showMullDatePicker(
     context,
     fitContent: true,
     builder: (sheet) => Padding(
-      padding: const EdgeInsets.fromLTRB(22, 4, 22, 26),
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 26),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -456,10 +496,7 @@ Future<DateTime?> showMullDatePicker(
             ),
           ),
           const SizedBox(height: 18),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: PillButton('Use this date', onTap: () => Navigator.of(sheet).pop(chosen)),
-          ),
+          PillButton('Use this date', onTap: () => Navigator.of(sheet).pop(chosen)),
         ],
       ),
     ),

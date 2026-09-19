@@ -723,7 +723,7 @@ class MullStore extends ChangeNotifier {
         : ' across ${owing.groups.length} groups';
     final upi = profile.upiId;
     return [
-      'Hey ${shortName(owing.member)} — ${inr(owing.amount)}$where when you get a chance.',
+      'Hey ${shortName(owing.member)}, ${inr(owing.amount)}$where when you get a chance.',
       if (upi != null) 'My UPI is $upi.',
       'No rush.',
     ].join(' ');
@@ -741,6 +741,45 @@ class MullStore extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------- readouts
+
+  /// The expenses a later settlement has already cleared.
+  ///
+  /// There is no "paid" flag on an expense, and there should not be: an expense
+  /// is a fact about a bill, not a debt. But there *is* an honest reading of
+  /// "settled" available for free. Replay the ledger oldest first, and every
+  /// time every balance in the group passes through zero, everything up to
+  /// that moment has been paid for. Those rows stay in the ledger and stop
+  /// asking for attention.
+  Set<String> settledExpenses(Group group) {
+    final events = <(DateTime, Object)>[
+      for (final e in group.expenses) (e.date, e),
+      for (final s in group.settlements)
+        if (s.clearsDebt) (s.date, s),
+    ]..sort((a, b) => a.$1.compareTo(b.$1));
+
+    final net = <String, int>{};
+    final seen = <String>[];
+    final settled = <String>{};
+
+    for (final (_, event) in events) {
+      if (event is Expense) {
+        net.update(event.payerId, (v) => v + event.amount, ifAbsent: () => event.amount);
+        event.shares.forEach(
+          (id, share) => net.update(id, (v) => v - share, ifAbsent: () => -share),
+        );
+        seen.add(event.id);
+      } else if (event is Settlement) {
+        net.update(event.fromId, (v) => v + event.amount, ifAbsent: () => event.amount);
+        net.update(event.toId, (v) => v - event.amount, ifAbsent: () => -event.amount);
+      }
+      // Square, and something has happened since the last time it was square.
+      if (seen.isNotEmpty && net.values.every((v) => v == 0)) {
+        settled.addAll(seen);
+        seen.clear();
+      }
+    }
+    return settled;
+  }
 
   /// Everything that happened in the group, newest first.
   List<Object> activity(Group group) =>
@@ -805,7 +844,13 @@ class MullStore extends ChangeNotifier {
     await flush();
   }
 
-  /// Mirrors the design mockups — handy for demos and screenshots.
+  /// Mirrors the design mockups. Handy for demos, screenshots and the tour.
+  ///
+  /// Deliberately not three tidy groups of equal shape. Between them they
+  /// cover every state a screen has to draw: a claim waiting on you, a
+  /// schedule about to come round, a seat belonging to somebody who is not on
+  /// Mull, expenses that a later settlement already cleared, and a ledger that
+  /// is square and still worth keeping.
   void loadSample() {
     groups.clear();
     profile
@@ -814,104 +859,169 @@ class MullStore extends ChangeNotifier {
       ..upiId ??= 'bharat@okhdfcbank';
 
     final today = dayOf(now());
+    DateTime ago(int days) => today.subtract(Duration(days: days));
 
-    // ---- Flat: you owe ₹6,250, with the rent on a schedule.
+    // ---- Goa trip: four people, one of them not on Mull, and a claim.
+    //
+    // The numbers are worked so the group lands exactly where the mockups put
+    // it: you ₹2,400 up, Sahil owing ₹800 and Kabir ₹1,600, which is the two
+    // payments the settle-up screen offers.
+    final goa = Group(name: 'Goa trip');
+    final you = Member(name: profile.name, isYou: true, upiId: profile.upiId);
+    final sahil = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
+    final ananya = Member(name: 'Ananya Rao', upiId: 'ananya@ybl', userId: newId());
+    // No userId and no VPA: a placeholder seat, settled in person.
+    final kabir = Member(name: 'Kabir');
+    goa.members.addAll([you, sahil, ananya, kabir]);
+    final goaIds = goa.members.map((m) => m.id).toList();
+
+    // The villa deposit and the three payments that cleared it. Everything up
+    // to here is history, and the ledger dims it.
+    final deposit = Expense(
+      description: 'Deposit for the villa',
+      amount: 5300,
+      payerId: you.id,
+      shares: splitEqually(5300, goaIds),
+      date: ago(50),
+    );
+    goa.expenses.add(deposit);
+    for (final payer in [sahil, ananya, kabir]) {
+      goa.settlements.add(
+        Settlement(
+          fromId: payer.id,
+          toId: you.id,
+          amount: deposit.shares[payer.id]!,
+          status: SettlementStatus.confirmed,
+          date: ago(48),
+          confirmedAt: ago(48),
+        ),
+      );
+    }
+
+    goa.expenses.addAll([
+      Expense(
+        description: 'Flights',
+        amount: 24000,
+        payerId: ananya.id,
+        shares: splitEqually(24000, goaIds),
+        date: ago(7),
+      ),
+      Expense(
+        description: 'Beach shack lunch',
+        amount: 1800,
+        payerId: sahil.id,
+        // Kabir sat this one out, which is why the ledger says three ways.
+        shares: splitEqually(1800, [you.id, sahil.id, ananya.id]),
+        date: ago(7),
+      ),
+      Expense(
+        description: 'Scooter rentals',
+        amount: 4800,
+        payerId: ananya.id,
+        method: SplitMethod.exact,
+        shares: {you.id: 1200, sahil.id: 1200, ananya.id: 1200, kabir.id: 1200},
+        date: ago(5),
+      ),
+      Expense(
+        description: 'Dinner at Gunpowder',
+        amount: 3200,
+        payerId: you.id,
+        shares: splitEqually(3200, goaIds),
+        date: ago(3),
+      ),
+    ]);
+
+    // Ananya fronted the flights, so most of the trip has already been paid
+    // back to her.
+    for (final (payer, amount) in [(you, 7800), (sahil, 6000), (kabir, 6400)]) {
+      goa.settlements.add(
+        Settlement(
+          fromId: payer.id,
+          toId: ananya.id,
+          amount: amount,
+          status: SettlementStatus.confirmed,
+          date: ago(4),
+          confirmedAt: ago(4),
+        ),
+      );
+    }
+
+    // Sahil says he has sent what is left of his share. Nothing moves until
+    // you say it landed.
+    goa.settlements.add(
+      Settlement(
+        fromId: sahil.id,
+        toId: you.id,
+        amount: 800,
+        utr: '429117338201',
+        date: ago(1),
+      ),
+    );
+
+    // ---- Flat: the standing costs, one of them nearly due.
     final flat = Group(name: 'Flat');
     final youFlat = Member(name: profile.name, isYou: true, upiId: profile.upiId);
+    final bhavya = Member(name: 'Bhavya Nair', upiId: 'bhavya@okicici', userId: newId());
     final sahilFlat = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
-    final devFlat = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
-    flat.members.addAll([youFlat, sahilFlat, devFlat]);
-
+    final dev = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
+    flat.members.addAll([youFlat, bhavya, sahilFlat, dev]);
     final flatIds = flat.members.map((m) => m.id).toList();
-    final rent = Expense(
-      description: 'Rent',
-      amount: 24000,
-      payerId: sahilFlat.id,
-      shares: splitEqually(24000, flatIds),
-      date: addMonths(today, -1),
+
+    final maintenance = Recurring(
+      description: 'Flat maintenance',
+      amount: 4200,
+      payerId: bhavya.id,
+      shares: splitEqually(4200, flatIds),
+      frequency: Frequency.monthly,
+      nextDue: today.add(const Duration(days: 6)),
+      lastAddedOn: ago(24),
     );
+    final houseHelp = Recurring(
+      description: 'House help',
+      amount: 3000,
+      payerId: youFlat.id,
+      shares: splitEqually(3000, flatIds),
+      frequency: Frequency.monthly,
+      // Due today, so the home screen has something to open.
+      nextDue: today,
+      lastAddedOn: ago(30),
+    );
+    flat.recurring.addAll([maintenance, houseHelp]);
+
     flat.expenses.addAll([
-      rent,
       Expense(
-        description: 'Dinner at Naru',
-        amount: 5250,
+        description: 'Flat maintenance',
+        amount: 4200,
+        payerId: bhavya.id,
+        shares: splitEqually(4200, flatIds),
+        recurringId: maintenance.id,
+        date: ago(24),
+      ),
+      Expense(
+        description: 'House help',
+        amount: 3000,
         payerId: youFlat.id,
-        shares: splitEqually(5250, flatIds),
-        date: today.subtract(const Duration(days: 9)),
+        shares: splitEqually(3000, flatIds),
+        recurringId: houseHelp.id,
+        date: ago(30),
       ),
       Expense(
         description: 'Electricity',
-        amount: 5250,
-        payerId: devFlat.id,
-        shares: splitEqually(5250, flatIds),
-        date: today.subtract(const Duration(days: 4)),
-      ),
-    ]);
-    final rentSchedule = Recurring(
-      description: 'Rent',
-      amount: 24000,
-      payerId: sahilFlat.id,
-      shares: splitEqually(24000, flatIds),
-      frequency: Frequency.monthly,
-      nextDue: today,
-      lastAddedOn: dayOf(rent.date),
-    );
-    flat.recurring.addAll([
-      rentSchedule,
-      Recurring(
-        description: 'Wifi',
-        amount: 1299,
-        payerId: youFlat.id,
-        shares: splitEqually(1299, flatIds),
-        frequency: Frequency.monthly,
-        nextDue: today.add(const Duration(days: 6)),
-      ),
-    ]);
-    rent.recurringId = rentSchedule.id;
-
-    // ---- Goa trip: you get back ₹2,400, and Sahil says he has sent it.
-    final goa = Group(name: 'Goa trip');
-    final youGoa = Member(name: profile.name, isYou: true, upiId: profile.upiId);
-    final sahilGoa = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
-    final rituGoa = Member(name: 'Ritu Nair', upiId: 'ritu@okicici', userId: newId());
-    final devGoa = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
-    goa.members.addAll([youGoa, sahilGoa, rituGoa, devGoa]);
-
-    final goaIds = goa.members.map((m) => m.id).toList();
-    goa.expenses.addAll([
-      Expense(
-        description: 'Hotel',
-        amount: 16000,
-        payerId: youGoa.id,
-        shares: splitEqually(16000, goaIds),
-        date: today.subtract(const Duration(days: 21)),
+        amount: 5800,
+        payerId: dev.id,
+        shares: splitEqually(5800, flatIds),
+        date: ago(12),
       ),
       Expense(
-        description: 'Flights',
-        amount: 14400,
-        payerId: devGoa.id,
-        shares: splitEqually(14400, goaIds),
-        date: today.subtract(const Duration(days: 24)),
-      ),
-      Expense(
-        description: 'Food and the shack',
+        description: 'Rent',
         amount: 24000,
-        payerId: rituGoa.id,
-        shares: splitEqually(24000, goaIds),
-        date: today.subtract(const Duration(days: 19)),
+        payerId: sahilFlat.id,
+        shares: splitEqually(24000, flatIds),
+        date: ago(18),
       ),
     ]);
-    goa.settlements.add(
-      Settlement(
-        fromId: sahilGoa.id,
-        toId: youGoa.id,
-        amount: 2400,
-        utr: '429117338201',
-        date: today.subtract(const Duration(days: 1)),
-      ),
-    );
 
-    // ---- Sunday football: settled up.
+    // ---- Sunday football: square, and still worth keeping.
     final football = Group(name: 'Sunday football');
     final youBall = Member(name: profile.name, isYou: true, upiId: profile.upiId);
     final sahilBall = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
@@ -924,7 +1034,7 @@ class MullStore extends ChangeNotifier {
         amount: 2400,
         payerId: youBall.id,
         shares: splitEqually(2400, ballIds),
-        date: today.subtract(const Duration(days: 6)),
+        date: ago(6),
       ),
     );
     for (final payer in [sahilBall, devBall]) {
@@ -934,13 +1044,36 @@ class MullStore extends ChangeNotifier {
           toId: youBall.id,
           amount: 800,
           status: SettlementStatus.confirmed,
-          date: today.subtract(const Duration(days: 5)),
-          confirmedAt: today.subtract(const Duration(days: 5)),
+          date: ago(5),
+          confirmedAt: ago(5),
         ),
       );
     }
 
-    groups.addAll([football, goa, flat]);
+    // ---- And one person, with no group around it.
+    final ritu = directWith(name: 'Ritu Nair', userId: newId(), upiId: 'ritu@okicici');
+    final youRitu = ritu.you!;
+    final herSeat = ritu.counterpart!;
+    final cab = Expense(
+      description: 'Cab to the airport',
+      amount: 900,
+      payerId: youRitu.id,
+      shares: splitEqually(900, [youRitu.id, herSeat.id]),
+      date: ago(11),
+    );
+    ritu.expenses.add(cab);
+    ritu.settlements.add(
+      Settlement(
+        fromId: herSeat.id,
+        toId: youRitu.id,
+        amount: 450,
+        status: SettlementStatus.confirmed,
+        date: ago(10),
+        confirmedAt: ago(10),
+      ),
+    );
+
+    groups.insertAll(0, [football, goa, flat]);
     _commit();
   }
 }

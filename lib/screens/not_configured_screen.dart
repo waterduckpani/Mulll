@@ -28,28 +28,26 @@ class NotConfiguredScreen extends StatelessWidget {
       body: Stack(
         children: [
           const Positioned.fill(
-            child: Backdrop(blobs: [BlobSpec(360, 62, top: -40, left: -90)]),
+            child: Backdrop(glow: GlowSpec(size: 440, top: -160, left: -150, right: null)),
           ),
           SafeArea(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 24, 24, 30),
+              padding: const EdgeInsets.fromLTRB(30, 24, 30, 30),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Eyebrow('Local build'),
-                  const SizedBox(height: 14),
-                  Text(
-                    'No server behind this build.',
-                    style: excon(32, tracking: -.02, height: 1.24, color: c.ink),
-                  ),
+                  const Eyebrow('Local build', size: 11, tracking: .18),
+                  const SizedBox(height: 16),
+                  Text('No server behind this build.', style: MullType.statement(c.ink, size: 34)),
                   const SizedBox(height: 16),
                   Text(
                     'Mull was built without Supabase keys, so there is nothing to '
-                    'sign in to. Everything works on this phone; groups will not sync.',
-                    style: ranade(14, height: 1.7, color: c.ink3),
+                    'sign in to. Everything works on this phone, and groups will '
+                    'not sync anywhere.',
+                    style: MullType.body(c.ink3),
                   ),
-                  const SizedBox(height: 32),
+                  const SizedBox(height: 34),
                   PillButton('Continue on this phone', onTap: onContinue),
                 ],
               ),

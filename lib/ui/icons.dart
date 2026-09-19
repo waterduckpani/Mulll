@@ -8,6 +8,7 @@ enum MullGlyph {
   pause,
   chevronRight,
   chevronLeft,
+  chevronDown,
   close,
   check,
   more,
@@ -137,6 +138,14 @@ class _GlyphPainter extends CustomPainter {
             ..moveTo(14.5, 5.5)
             ..lineTo(8, 12)
             ..lineTo(14.5, 18.5),
+          stroke,
+        );
+      case MullGlyph.chevronDown:
+        canvas.drawPath(
+          Path()
+            ..moveTo(5.5, 9.5)
+            ..lineTo(12, 16)
+            ..lineTo(18.5, 9.5),
           stroke,
         );
       case MullGlyph.close:

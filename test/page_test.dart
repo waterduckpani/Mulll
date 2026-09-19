@@ -14,7 +14,6 @@ void main() {
         child: MaterialApp(
           theme: buildTheme(MullColors.light),
           home: MullPage(
-            blobs: const [],
             bottom: const Text('Budget covers 5 of 7'),
             children: [for (var i = 0; i < rows; i++) SizedBox(height: 90, child: Text('row $i'))],
           ),
