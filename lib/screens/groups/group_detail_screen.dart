@@ -84,29 +84,50 @@ class GroupDetailScreen extends StatelessWidget {
         onTap: () => showAddExpense(context, group),
       ),
       children: [
-        // The icon sits above the title rather than beside it: a 32pt title
-        // next to a 38px badge makes the badge look like a button, and the
-        // one thing on this screen that must not compete with the number is
-        // the name of the thing the number is about.
-        if (!group.isDirect)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(Gutter.text, 22, Gutter.text, 0),
-            child: Row(
-              children: [
+        // The icon sits beside the title, not above it.
+        //
+        // Above was the first attempt and it cost 66 points of height, which
+        // this screen turns out not to have: adding People to the
+        // destinations already pushed Ledger under the fold on a 6.3" phone.
+        // Beside costs nothing, and a 44px badge next to a 32pt title reads as
+        // part of the name rather than as a control.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(Gutter.text, 22, Gutter.text, 0),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              if (!group.isDirect) ...[
                 Pressable(
                   onTap: group.youAreAdmin ? () => pickGroupIcon(context, group) : null,
                   scale: .92,
                   semanticLabel: 'Group icon',
                   child: GroupBadge(group: group, size: 44, glyphSize: 21),
                 ),
+                const SizedBox(width: 16),
               ],
-            ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Semantics(
+                      header: true,
+                      child: Text(
+                        group.title,
+                        style: MullType.screenTitle(c.ink),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      group.isDirect ? 'Just you two' : '${group.members.length} people',
+                      style: MullType.caption(c.ink3, size: 12.5),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-
-        PageTitle(
-          group.title,
-          subtitle: group.isDirect ? 'Just you two' : '${group.members.length} people',
-          padding: EdgeInsets.fromLTRB(Gutter.text, group.isDirect ? 22 : 16, Gutter.text, 0),
         ),
 
         HeroAmount(

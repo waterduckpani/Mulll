@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:mull/data/store.dart';
 import 'package:mull/main.dart';
+import 'package:mull/screens/groups/icon_picker.dart';
 import 'package:mull/ui/icons.dart';
 import 'package:mull/ui/sheet.dart';
 
@@ -27,7 +28,18 @@ void main() {
   Finder glyph(MullGlyph g) =>
       find.byWidgetPredicate((w) => w is MullIcon && w.glyph == g).hitTestable().last;
 
+  /// Taps a label, scrolling it into view first if it is below the fold.
+  ///
+  /// A plain `hitTestable()` finder is not enough on a screen whose length
+  /// depends on the data — a group with a claim card on it pushes the last
+  /// destination off a 6.3" phone, and the failure reads as "that widget does
+  /// not exist" rather than "you cannot see it yet".
   Future<void> tapText(WidgetTester t, String text) async {
+    if (find.text(text).hitTestable().evaluate().isEmpty &&
+        find.text(text).evaluate().isNotEmpty) {
+      await t.drag(find.byType(Scrollable).last, const Offset(0, -220));
+      await settle(t, 600);
+    }
     await t.tap(find.text(text).hitTestable().last);
     await settle(t);
   }
@@ -81,6 +93,21 @@ void main() {
     // ---- 4D, a group
     await tapText(t, 'Goa trip');
     await shot(t, '04-group-detail');
+
+    // ---- who is in it, and who runs it
+    await tapText(t, 'People');
+    await shot(t, '04b-members');
+    await back(t);
+
+    // ---- the mark the group carries, and finding one by name
+    await t.tap(find.byType(GroupBadge).hitTestable().first);
+    await settle(t, 700);
+    await shot(t, '04c-icon-picker');
+    await t.enterText(find.byType(TextField).first, 'beach');
+    FocusManager.instance.primaryFocus?.unfocus();
+    await settle(t);
+    await shot(t, '04d-icon-search');
+    await dismissSheet(t);
 
     // ---- 4E, settling up, and the sheet a row opens
     await tapText(t, 'Settle up');

@@ -40,7 +40,10 @@ class GroupMembersScreen extends StatelessWidget {
 
     final youAreAdmin = group.youAreAdmin;
     final admins = group.admins.length;
-    final onMull = group.members.where((m) => m.isLinked).length;
+    // Your own seat carries no account id locally — it is built from the
+    // profile, which has none — so asking `isLinked` about yourself says no
+    // and the header confidently reported you as not on Mull.
+    final onMull = group.members.where((m) => m.isYou || m.isLinked).length;
     final cannotLeave = store.whyYouCannotLeave(group);
 
     Future<void> addFromFriends() async {
@@ -225,7 +228,7 @@ class _MemberRow extends StatelessWidget {
     final balance = group.balances[member.id] ?? 0;
 
     final standing = switch (null) {
-      _ when !member.isLinked => 'Not on Mull yet',
+      _ when !member.isYou && !member.isLinked => 'Not on Mull yet',
       _ when member.isAdmin => 'Admin',
       _ => 'Member',
     };
@@ -276,8 +279,8 @@ class _MemberRow extends StatelessWidget {
                   Text(
                     [
                       if (group.isDirect || !member.isAdmin) standing,
-                      if (member.isLinked && member.upiId == null) 'no UPI ID yet',
-                      if (!member.isLinked && member.email != null) member.email!,
+                      if (!member.isYou && member.isLinked && member.upiId == null) 'no UPI ID yet',
+                      if (!member.isYou && !member.isLinked && member.email != null) member.email!,
                     ].where((s) => s.isNotEmpty).join(' · '),
                     style: MullType.caption(c.ink3, size: 11.5),
                     maxLines: 1,
