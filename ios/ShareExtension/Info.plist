@@ -11,16 +11,19 @@
 			     three things the inbox knows how to read. -->
 			<key>NSExtensionActivationRule</key>
 			<dict>
+				<!-- A three-hour browsing session ends with a camera roll full
+				     of screenshots. Selecting twenty of them and sorting the
+				     lot in one pass is the whole point of the share sheet. -->
 				<key>NSExtensionActivationSupportsImageWithMaxCount</key>
-				<integer>1</integer>
+				<integer>20</integer>
 				<key>NSExtensionActivationSupportsWebURLWithMaxCount</key>
 				<integer>1</integer>
 				<key>NSExtensionActivationSupportsText</key>
 				<true/>
 			</dict>
 		</dict>
-		<!-- No storyboard: the extension has no form to fill in. It queues what
-		     it was handed, says so, and dismisses. -->
+		<!-- No storyboard: the triage UI is built in code so it can size itself
+		     to however many screenshots arrived. -->
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
 		<key>NSExtensionPointIdentifier</key>

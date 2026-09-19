@@ -121,32 +121,47 @@ class _MullPageState extends State<MullPage> {
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: IgnorePointer(
-                  ignoring: false,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 240),
-                    padding: EdgeInsets.only(top: 28, bottom: ctaBottom),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          c.screen.withValues(alpha: 0),
-                          c.screen.withValues(alpha: _overflowing ? .94 : 0),
-                          c.screen.withValues(alpha: _overflowing ? .98 : 0),
-                        ],
-                        stops: const [0, .35, 1],
+                // A fade strip, then a solid block the content sits directly on.
+                //
+                // This used to be one gradient behind the whole footer, which
+                // only reached full opacity a third of the way down: fine under
+                // a lone button, but any text in `bottom` sat in the
+                // see-through part and collided with the list behind it.
+                child: MeasureSize(
+                  onChange: (s) {
+                    if ((s.height - _bottomHeight).abs() > .5) setState(() => _bottomHeight = s.height);
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AnimatedContainer(
+                        key: const ValueKey('footerScrim'),
+                        duration: const Duration(milliseconds: 240),
+                        height: 28,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            // Fully opaque, not almost: at 98% the rows behind
+                            // still ghost through as readable text along the
+                            // bottom edge.
+                            colors: [
+                              c.screen.withValues(alpha: 0),
+                              _overflowing ? c.screen : c.screen.withValues(alpha: 0),
+                            ],
+                          ),
+                        ),
                       ),
-                    ),
-                    child: MeasureSize(
-                      onChange: (s) {
-                        if ((s.height - _bottomHeight).abs() > .5) setState(() => _bottomHeight = s.height);
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 22),
-                        child: widget.bottom!,
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 240),
+                        color: _overflowing ? c.screen : c.screen.withValues(alpha: 0),
+                        padding: EdgeInsets.only(bottom: ctaBottom),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 22),
+                          child: widget.bottom!,
+                        ),
                       ),
-                    ),
+                    ],
                   ),
                 ),
               ),

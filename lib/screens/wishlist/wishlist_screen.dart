@@ -8,9 +8,11 @@ import '../../ui/icons.dart';
 import '../../ui/page.dart';
 import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
+import '../money/budget_card.dart';
 import '../shell.dart';
 import 'add_sheet.dart';
 import 'item_sheets.dart';
+import 'need_check_sheet.dart';
 
 class WishlistScreen extends StatelessWidget {
   const WishlistScreen({super.key});
@@ -53,8 +55,10 @@ class WishlistScreen extends StatelessWidget {
           ),
           children: [
             const PageTitle('Wishlist'),
+            const BudgetCard(),
+            if (store.needsToRecheck.isNotEmpty) const _RecheckCard(),
             Padding(
-              padding: const EdgeInsets.fromLTRB(22, 10, 22, 0),
+              padding: const EdgeInsets.fromLTRB(22, 14, 22, 0),
               child: Segmented(
                 labels: const ['Needs', 'Wants'],
                 counts: [needCount, wantCount],
@@ -159,7 +163,9 @@ class _ReachList extends StatelessWidget {
                       _Row(
                         key: ValueKey(item.id),
                         name: item.name,
-                        subtitle: '${subtitle(item)} · ${inr(short)} short',
+                        // When is far more useful than how much: "₹25,800
+                        // short" is a dead end, "by December" is a plan.
+                        subtitle: '${subtitle(item)} · ${_waitLabel(store, item, now) ?? '${inr(short)} short'}',
                         price: item.price,
                         dimmed: true,
                         onTap: () => showItemSheet(context, item),
@@ -171,6 +177,58 @@ class _ReachList extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// "in reach next month" / "in reach by December", or null when we genuinely
+/// cannot say — in which case the caller falls back to how far short it is.
+String? _waitLabel(MullStore store, WishItem item, DateTime now) {
+  final months = store.monthsToReach(item);
+  if (months == null) return null;
+  if (months == 1) return 'in reach next month';
+  return 'in reach by ${monthLabel(store.reachDate(item)!, now)}';
+}
+
+/// Needs quietly reserve money every month, so they have to be re-confirmed
+/// every month. Otherwise one forgotten need eats the budget forever.
+class _RecheckCard extends StatelessWidget {
+  const _RecheckCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final store = context.store;
+    final c = context.c;
+    final recheck = store.needsToRecheck;
+
+    return Glass(
+      margin: const EdgeInsets.fromLTRB(22, 12, 22, 0),
+      radius: 26,
+      child: Pressable(
+        onTap: () => recheckNeeds(context),
+        scale: .98,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 14, 18, 14),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Still needs?', style: ranade(15, color: c.ink)),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${recheck.length} ${recheck.length == 1 ? 'need' : 'needs'} to re-check for ${store.cycle.label}',
+                      style: ranade(11.5, color: c.ink3),
+                    ),
+                  ],
+                ),
+              ),
+              MullIcon(MullGlyph.chevronRight, size: 16, color: c.ink3, strokeWidth: 1.7),
+            ],
+          ),
+        ),
       ),
     );
   }

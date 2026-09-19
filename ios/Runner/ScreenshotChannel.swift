@@ -71,58 +71,23 @@ enum ScreenshotChannel {
     return top
   }
 
-  /// Recognises text and flattens it into something Dart can reason about:
-  /// normalised boxes with (0,0) at the top-left, which is how the parser thinks.
+  /// Wraps the shared recogniser for the method channel. The recognition lives
+  /// in `Shared/MullScreenshot.swift` so the extension runs the same code.
   static func read(_ image: CGImage, orientation: CGImagePropertyOrientation) -> [String: Any] {
-    let request = VNRecognizeTextRequest()
-    request.recognitionLevel = .accurate
-    request.usesLanguageCorrection = false  // product names and prices are not prose
-    request.recognitionLanguages = ["en-US"]
-
-    let handler = VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
-    try? handler.perform([request])
-
-    let lines: [[String: Any]] = (request.results ?? []).compactMap { observation in
-      guard let best = observation.topCandidates(1).first else { return nil }
-      let box = observation.boundingBox  // normalised, origin bottom-left
-      return [
-        "text": best.string,
-        "x": Double(box.minX),
-        "y": Double(1 - box.maxY),
-        "w": Double(box.width),
-        "h": Double(box.height),
-        "conf": Double(best.confidence),
-      ]
-    }
-    return ["lines": lines, "thumb": FlutterStandardTypedData(bytes: thumbnail(image))]
-  }
-
-  /// Small preview so the sheet can show what it just read.
-  private static func thumbnail(_ image: CGImage, width: CGFloat = 320) -> Data {
-    let source = UIImage(cgImage: image)
-    let scale = min(1, width / max(source.size.width, 1))
-    let size = CGSize(width: source.size.width * scale, height: source.size.height * scale)
-    let scaled = UIGraphicsImageRenderer(size: size).image { _ in
-      source.draw(in: CGRect(origin: .zero, size: size))
-    }
-    return scaled.jpegData(compressionQuality: 0.7) ?? Data()
+    [
+      "lines": MullScreenshot.lines(image, orientation: orientation).map(\.json),
+      "thumb": FlutterStandardTypedData(bytes: MullScreenshot.thumbnail(image)),
+    ]
   }
 }
 
 /// Reads what the share extension queued in the App Group container.
 ///
-/// The writing half lives in `ShareExtension/ShareViewController.swift`. The
-/// two are deliberately separate copies of a very small amount of path logic —
-/// sharing one file would mean adding it to both targets, and the only thing
-/// they must agree on is the group identifier below.
+/// The writing half lives in `ShareExtension/ShareViewController.swift`; both
+/// sides go through `Shared/MullInbox.swift`, so the paths and entry shapes
+/// cannot drift apart.
 enum Inbox {
-  static let appGroup = "group.com.bharatkhanna.mull"
-
-  private static var directory: URL? {
-    FileManager.default
-      .containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
-      .appendingPathComponent("inbox", isDirectory: true)
-  }
+  private static var directory: URL? { MullInbox.directory }
 
   /// Everything shared since the last launch, oldest first, with screenshots
   /// already recognised. Each entry is removed as it is read, so a crash
@@ -154,6 +119,9 @@ enum Inbox {
 
   private static func resolve(_ item: [String: Any], in directory: URL) -> [String: Any]? {
     switch item["kind"] as? String {
+    case "resolved":
+      // Already triaged in the share sheet — hand it straight through.
+      return item
     case "image":
       guard let name = item["file"] as? String else { return nil }
       let path = directory.appendingPathComponent(name)
@@ -162,7 +130,7 @@ enum Inbox {
         let image = UIImage(data: data),
         let cgImage = image.cgImage
       else { return nil }
-      var read = ScreenshotChannel.read(cgImage, orientation: image.cgOrientation)
+      var read = ScreenshotChannel.read(cgImage, orientation: image.mullOrientation)
       read["kind"] = "image"
       return read
     case "link":
@@ -203,24 +171,7 @@ private final class ScreenshotPicker: NSObject, PHPickerViewControllerDelegate {
         self?.finish(nil)
         return
       }
-      self?.finish(ScreenshotChannel.read(cgImage, orientation: image.cgOrientation))
-    }
-  }
-}
-
-private extension UIImage {
-  /// Screenshots are always `.up`, but a photo of a price tag might not be.
-  var cgOrientation: CGImagePropertyOrientation {
-    switch imageOrientation {
-    case .up: return .up
-    case .down: return .down
-    case .left: return .left
-    case .right: return .right
-    case .upMirrored: return .upMirrored
-    case .downMirrored: return .downMirrored
-    case .leftMirrored: return .leftMirrored
-    case .rightMirrored: return .rightMirrored
-    @unknown default: return .up
+      self?.finish(ScreenshotChannel.read(cgImage, orientation: image.mullOrientation))
     }
   }
 }

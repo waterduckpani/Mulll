@@ -44,10 +44,10 @@ void main() {
     await tapText(t, 'Needs');
     await shot(t, '02b-wishlist-needs');
 
-    await tapText(t, 'Money');
+    await tapText(t, 'Wants');
     await shot(t, '01-budget-home');
 
-    await tapText(t, 'Add something');
+    await tapText(t, 'Add to wishlist');
     await t.enterText(find.byType(TextField).at(0), 'Office chair');
     await t.enterText(find.byType(TextField).at(1), '28k');
     await tapText(t, 'Need');
@@ -76,11 +76,30 @@ void main() {
 
     await tapText(t, 'Groups');
     await shot(t, '04-groups');
-    await tapText(t, 'Goa flights');
+    await tapText(t, 'Goa trip');
     await shot(t, '05-group-detail');
-    await tapText(t, 'Declare a contribution');
-    await shot(t, '11-declare');
-    await t.tap(glyph(MullGlyph.close));
+    await tapText(t, 'Add an expense');
+    await t.enterText(find.byType(TextField).at(0), 'Scooter rental');
+    await t.enterText(find.byType(TextField).at(1), '2400');
+    FocusManager.instance.primaryFocus?.unfocus();
+    await settle(t);
+    await shot(t, '11-add-expense');
+    await tapText(t, 'Add it');
+    await settle(t, 800);
+    expect(store.groups.first.expenses.map((e) => e.description), contains('Scooter rental'));
+    await shot(t, '05b-group-after-expense');
+
+    await shot(t, '15-confirm-claim');
+
+    // A pending claim sits above "Who pays whom", so scroll to reach the rows.
+    await t.ensureVisible(find.textContaining('→').first);
+    await settle(t);
+
+    // The row that says who pays whom, straight into the settle-up sheet.
+    await t.tap(find.textContaining('→').hitTestable().first);
+    await settle(t);
+    await shot(t, '14-settle-up');
+    await t.tapAt(const Offset(200, 80)); // dismiss by tapping the scrim
     await settle(t);
 
     await tapText(t, 'Lists');
@@ -104,11 +123,10 @@ void main() {
     await settle(t);
     await shot(t, '06c-named-list-dark');
 
-    await tapText(t, 'Money');
-    await t.tap(find.text('Money').hitTestable().last); // pop to root
+    await tapText(t, 'Wishlist');
+    await t.tap(find.text('Wishlist').hitTestable().last); // pop to root
     await settle(t);
     await shot(t, '01c-home-dark');
-    await tapText(t, 'Wishlist');
     await tapText(t, 'Wants');
     await shot(t, '02c-wishlist-dark');
   });

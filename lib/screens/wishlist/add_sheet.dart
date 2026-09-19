@@ -32,7 +32,10 @@ Future<void> showQuickAdd(BuildContext context, {ItemKind? kind, InboxItem? shar
   final store = context.readStore;
   final result = await showMullSheet<AddResult>(
     context,
-    height: 604,
+    // Tall enough for the need/want pair to sit above the fold. Below this the
+    // scroll view clips them, and a choice you cannot see is a choice you
+    // cannot make — it is the one control this sheet cannot save without.
+    height: 664,
     builder: (_) => AddSheet(
       title: shared == null ? 'Add something' : 'Add this to Mull',
       cta: 'Save it',
@@ -381,6 +384,9 @@ class _AddSheetState extends State<AddSheet> {
         Expanded(
           child: SingleChildScrollView(
             physics: const BouncingScrollPhysics(),
+            // On a short screen the content still scrolls; this keeps the last
+            // control clear of the fold instead of flush against it.
+            padding: const EdgeInsets.only(bottom: 10),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [

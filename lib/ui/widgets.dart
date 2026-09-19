@@ -645,6 +645,7 @@ class BigField extends StatelessWidget {
     this.onSubmitted,
     this.textInputAction,
     this.capitalization = TextCapitalization.sentences,
+    this.keyboardType,
   });
 
   final TextEditingController controller;
@@ -659,6 +660,10 @@ class BigField extends StatelessWidget {
   final ValueChanged<String>? onSubmitted;
   final TextInputAction? textInputAction;
   final TextCapitalization capitalization;
+
+  /// Overrides the keyboard the field would otherwise pick from [numeric] —
+  /// an email address wants its own, with the @ to hand.
+  final TextInputType? keyboardType;
 
   @override
   Widget build(BuildContext context) {
@@ -687,10 +692,12 @@ class BigField extends StatelessWidget {
                   cursorOpacityAnimates: true,
                   keyboardAppearance: c.isDark ? Brightness.dark : Brightness.light,
                   textCapitalization: numeric ? TextCapitalization.none : capitalization,
-                  keyboardType: numeric
-                      ? const TextInputType.numberWithOptions(signed: true, decimal: true)
-                      : TextInputType.text,
-                  autocorrect: !numeric,
+                  keyboardType:
+                      keyboardType ??
+                      (numeric
+                          ? const TextInputType.numberWithOptions(signed: true, decimal: true)
+                          : TextInputType.text),
+                  autocorrect: !numeric && keyboardType == null,
                   textInputAction: textInputAction,
                   onChanged: onChanged,
                   onSubmitted: onSubmitted,

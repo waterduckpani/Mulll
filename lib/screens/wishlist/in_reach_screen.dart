@@ -31,7 +31,7 @@ class InReachScreen extends StatefulWidget {
 
 class _InReachScreenState extends State<InReachScreen> with SingleTickerProviderStateMixin {
   late final AnimationController _enter = AnimationController(vsync: this, duration: const Duration(milliseconds: 900));
-  late final int _free = context.readStore.free;
+  late final int _free = context.readStore.leftForWants;
   bool _done = false;
 
   @override

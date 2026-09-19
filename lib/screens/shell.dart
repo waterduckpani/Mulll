@@ -11,14 +11,16 @@ import '../ui/page.dart';
 import '../ui/sheet.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
+import 'groups/group_sheets.dart';
 import 'groups/groups_screen.dart';
 import 'lists/lists_screen.dart';
-import 'money/home_screen.dart';
 import 'wishlist/add_sheet.dart';
 import 'wishlist/in_reach_screen.dart';
 import 'wishlist/wishlist_screen.dart';
 
-enum MullTab { money, wishlist, groups, lists }
+/// No Money tab: the budget is a ruler for the wishlist, not a place of its
+/// own, so it lives at the top of the list it measures.
+enum MullTab { wishlist, groups, lists }
 
 /// Lets any screen switch tabs (e.g. "See all 11 items" → Wishlist).
 class ShellScope extends InheritedWidget {
@@ -43,7 +45,7 @@ class Shell extends StatefulWidget {
 }
 
 class _ShellState extends State<Shell> with WidgetsBindingObserver {
-  MullTab _tab = MullTab.money;
+  MullTab _tab = MullTab.wishlist;
   final _navigators = {for (final t in MullTab.values) t: GlobalKey<NavigatorState>()};
   bool _showingReach = false;
   bool _draining = false;
@@ -86,11 +88,12 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
     }
   }
 
-  /// Offers whatever was shared into Mull from other apps, one item at a time.
+  /// Takes in whatever was shared into Mull from other apps.
   ///
-  /// The share extension only queues; every guess still has to pass through the
-  /// same editable sheet as a typed entry, because OCR is a guess and the user
-  /// is the one who knows what they actually looked at.
+  /// Anything settled in the share sheet is added without a word — that is the
+  /// bargain: answer in the share sheet, never see a sheet here. Only raw
+  /// shares still open the add sheet, because an unread guess needs the person
+  /// who actually looked at the page.
   Future<void> _drainInbox() async {
     if (_draining || !mounted) return;
     _draining = true;
@@ -102,9 +105,36 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
       await _waitForClearScreen();
       if (!mounted) return;
 
-      for (final item in await Inbox.drain()) {
+      final shared = await Inbox.drain();
+      final store = _store!;
+      var added = 0;
+      for (final item in shared.whereType<SharedItem>()) {
+        store.addItem(name: item.name, price: item.price, kind: item.kind, url: item.url);
+        added++;
+      }
+      if (added > 0 && mounted) {
+        _select(MullTab.wishlist);
+        Toast.show(context, added == 1 ? 'Added 1 item from your share' : 'Added $added items from your share');
+      }
+
+      for (final item in shared) {
+        if (item is SharedItem) continue;
         await _waitForClearScreen();
         if (!mounted) return;
+
+        // A screenshot that reads like a payment and lines up with something
+        // you owe is almost certainly a receipt, not a thing you want to buy.
+        // Matching against the ledger is the filter: a product page has no
+        // open debt to land on, so it falls through to the wishlist as before.
+        if (item is SharedShot && item.looksLikePayment) {
+          final match = store.matchReceipt(item.receipt!);
+          if (match != null) {
+            _select(MullTab.groups);
+            await showReceiptSettle(context, match.$1, match.$2, item.receipt!);
+            continue;
+          }
+        }
+
         _select(MullTab.wishlist);
         await showQuickAdd(context, shared: item);
       }
@@ -150,7 +180,6 @@ class _ShellState extends State<Shell> with WidgetsBindingObserver {
   }
 
   Widget _root(MullTab tab) => switch (tab) {
-    MullTab.money => const HomeScreen(),
     MullTab.wishlist => const WishlistScreen(),
     MullTab.groups => const GroupsScreen(),
     MullTab.lists => const ListsScreen(),
@@ -234,7 +263,6 @@ class _TabBar extends StatelessWidget {
   final void Function(MullTab) onSelect;
 
   static const _items = [
-    (MullTab.money, MullGlyph.money, 'Money'),
     (MullTab.wishlist, MullGlyph.wishlist, 'Wishlist'),
     (MullTab.groups, MullGlyph.groups, 'Groups'),
     (MullTab.lists, MullGlyph.lists, 'Lists'),
@@ -259,7 +287,7 @@ class _TabBar extends StatelessWidget {
           child: LayoutBuilder(
             builder: (context, box) {
               const gap = 6.0;
-              final w = (box.maxWidth - gap * 3) / 4;
+              final w = (box.maxWidth - gap * (_items.length - 1)) / _items.length;
               return Stack(
                 alignment: Alignment.centerLeft,
                 children: [

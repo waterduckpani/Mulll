@@ -80,10 +80,10 @@ class _BudgetSheetState extends State<BudgetSheet> {
                   hint: '₹0',
                   help: Text(
                     a == null
-                        ? 'What you can spend each month, after rent, bills and savings.'
+                        ? 'What you can put towards things each month — after rent, bills and savings.'
                         : a < committed
                         ? 'That is ${inr(committed - a)} less than what is already spent and set aside for needs.'
-                        : 'Leaves ${inr(a - committed)} free after spending and needs.',
+                        : 'Leaves ${inr(a - committed)} for wants after spending and needs.',
                   ),
                 ),
                 const SizedBox(height: 26),

@@ -10,8 +10,22 @@ import '../../ui/sheet.dart';
 import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
 
-void buyWithUndo(BuildContext context, WishItem item) {
+/// Buys [item], pausing first only when the buy lands past this month's line.
+///
+/// Nothing is asked when it fits. Two wants being in reach together already
+/// means the budget covers both, so buying one costs the other nothing — a
+/// confirmation there would be theatre. Going past the line is the one moment
+/// that deserves a beat.
+Future<void> buyWithUndo(BuildContext context, WishItem item) async {
   final store = context.readStore;
+  final over = store.overBudgetBy(item);
+  final needsMoney = item.kind == ItemKind.want && over == 0 && item.price > store.leftForWants;
+
+  if (over > 0 || needsMoney) {
+    final go = await _confirmStretch(context, item, over: over, needsMoney: needsMoney);
+    if (go != true || !context.mounted) return;
+  }
+
   final spend = store.buyItem(item);
   HapticFeedback.heavyImpact();
   Toast.show(
@@ -21,6 +35,50 @@ void buyWithUndo(BuildContext context, WishItem item) {
     onAction: () {
       store.removeSpend(spend);
     },
+  );
+}
+
+Future<bool?> _confirmStretch(
+  BuildContext context,
+  WishItem item, {
+  required int over,
+  required bool needsMoney,
+}) {
+  final store = context.readStore;
+  final waitUntil = store.reachDate(item);
+  final now = store.now();
+
+  return showMullSheet<bool>(
+    context,
+    fitContent: true,
+    builder: (sheet) => Padding(
+      padding: const EdgeInsets.fromLTRB(30, 26, 30, 28),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Eyebrow(over > 0 ? 'Past this month' : 'That is needs money'),
+          const SizedBox(height: 10),
+          Text(
+            over > 0
+                ? '${inr(over)} more than ${store.cycle.label} has left.'
+                : 'Buying this dips into what you set aside for your needs.',
+            style: excon(24, tracking: -.02, height: 1.2, color: sheet.c.ink),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            waitUntil == null
+                ? 'You can still buy it — Mull just logs it and the month runs short.'
+                : 'Wait and it comes into reach by ${monthLabel(waitUntil, now)}.',
+            style: ranade(13, height: 1.55, color: sheet.c.ink3),
+          ),
+          const SizedBox(height: 22),
+          PillButton('Buy it anyway', onTap: () => Navigator.of(sheet).pop(true)),
+          const SizedBox(height: 8),
+          GhostButton("I'll wait", onTap: () => Navigator.of(sheet).pop(false)),
+        ],
+      ),
+    ),
   );
 }
 

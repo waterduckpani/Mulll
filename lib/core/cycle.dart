@@ -43,6 +43,10 @@ const _months = [
 
 String monthName(int month) => _months[month - 1];
 
+/// "December" — with the year once it is far enough out to be ambiguous.
+String monthLabel(DateTime then, DateTime now) =>
+    then.year == now.year ? monthName(then.month) : '${monthName(then.month)} ${then.year}';
+
 String shortDate(DateTime d) => '${d.day} ${_months[d.month - 1].substring(0, 3)}';
 
 String ordinal(int n) {
