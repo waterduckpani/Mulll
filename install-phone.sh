@@ -76,7 +76,29 @@ else
   echo "Using the existing build in build/ios/iphoneos/Runner.app"
 fi
 
+# Wireless installs drop. "Connection reset by peer" mid-transfer is not a
+# broken build and not a broken pairing, it is Wi-Fi, and the next attempt
+# usually goes straight through.
 echo "Installing to $DEVICE"
-xcrun devicectl device install app --device "$DEVICE" build/ios/iphoneos/Runner.app
+ATTEMPT=1
+until xcrun devicectl device install app --device "$DEVICE" build/ios/iphoneos/Runner.app; do
+  if [ "$ATTEMPT" -ge 5 ]; then
+    echo
+    echo "Gave up after $ATTEMPT attempts. Plug the phone in over USB and run:"
+    echo "  ./install-phone.sh --install-only"
+    exit 1
+  fi
+  ATTEMPT=$((ATTEMPT + 1))
+  echo "Connection dropped. Attempt $ATTEMPT..."
+  sleep 3
+  DEVICE=$(find_device)
+  if [ -z "$DEVICE" ]; then
+    echo "Waiting for the phone to come back..."
+    while [ -z "$DEVICE" ]; do
+      sleep 5
+      DEVICE=$(find_device)
+    done
+  fi
+done
 
 echo "Done. Open Mull on the phone."
