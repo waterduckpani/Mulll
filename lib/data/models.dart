@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart' show ThemeMode;
 
 import '../core/dates.dart';
+import '../core/split.dart';
 
 final _rng = Random();
 
@@ -359,6 +360,7 @@ class Settlement {
     required this.amount,
     this.status = SettlementStatus.pending,
     this.utr,
+    this.offset = false,
     DateTime? date,
     this.confirmedAt,
   }) : id = id ?? newId(),
@@ -374,6 +376,16 @@ class Settlement {
   /// something behind it.
   String? utr;
 
+  /// No money moved: this cancels an equal debt pointing the other way in
+  /// another ledger.
+  ///
+  /// Worth its own flag rather than looking like an ordinary payment. Owing
+  /// Ananya 2,000 on the trip while she owes you 3,000 on the flat is settled
+  /// by writing 2,000 into both ledgers, and a row saying "You paid Ananya
+  /// 2,000" when nothing left your account is the kind of entry that makes
+  /// somebody stop trusting the whole ledger.
+  final bool offset;
+
   /// When it was claimed.
   final DateTime date;
   DateTime? confirmedAt;
@@ -388,6 +400,7 @@ class Settlement {
     'amount': amount,
     'status': status.name,
     'utr': utr,
+    'offset': offset,
     'date': date.toIso8601String(),
     'confirmedAt': confirmedAt?.toIso8601String(),
   };
@@ -400,8 +413,35 @@ class Settlement {
     // Settlements written before confirmation existed were facts, not claims.
     status: SettlementStatus.values.byName(j['status'] as String? ?? 'confirmed'),
     utr: j['utr'] as String?,
+    offset: j['offset'] as bool? ?? false,
     date: _date(j['date']),
     confirmedAt: _date(j['confirmedAt']),
+  );
+}
+
+/// A row this phone has deleted that the server may not know about yet.
+///
+/// Mull pushes a whole group at a time and the push is an upsert, which can
+/// only ever say "this row exists". Deleting locally and saying nothing meant
+/// the row survived on the server and came back on the next pull — an expense
+/// reappearing days later, with everyone's balance silently moving with it.
+///
+/// A tombstone is the other half of that sentence. It is kept in the file, so
+/// a delete made on a plane still reaches the server when the signal comes
+/// back, and it is dropped once the server has acted on it.
+enum TombstoneKind { expense, settlement, recurring, member }
+
+class Tombstone {
+  const Tombstone({required this.id, required this.kind});
+
+  final String id;
+  final TombstoneKind kind;
+
+  Map<String, dynamic> toJson() => {'id': id, 'kind': kind.name};
+
+  factory Tombstone.fromJson(Map<String, dynamic> j) => Tombstone(
+    id: j['id'] as String,
+    kind: TombstoneKind.values.byName(j['kind'] as String),
   );
 }
 
@@ -424,6 +464,7 @@ class Group {
     List<Expense>? expenses,
     List<Settlement>? settlements,
     List<Recurring>? recurring,
+    List<Tombstone>? tombstones,
     DateTime? createdAt,
     this.syncedAt,
   }) : id = id ?? newId(),
@@ -431,6 +472,7 @@ class Group {
        expenses = expenses ?? [],
        settlements = settlements ?? [],
        recurring = recurring ?? [],
+       tombstones = tombstones ?? [],
        createdAt = createdAt ?? DateTime.now();
 
   final String id;
@@ -449,6 +491,11 @@ class Group {
   final List<Expense> expenses;
   final List<Settlement> settlements;
   final List<Recurring> recurring;
+
+  /// Deletions this phone has made that the server may not have been told
+  /// about. Emptied by the sync once it has passed them on.
+  final List<Tombstone> tombstones;
+
   final DateTime createdAt;
 
   /// When the server last accepted this group. Null means it has never been
@@ -513,6 +560,50 @@ class Group {
   /// Your own position, or 0 in a group you are somehow not part of.
   int get yourBalance => balances[you?.id] ?? 0;
 
+  /// What two people owe each other in this ledger, and nobody else.
+  ///
+  /// Positive means [otherId] owes [meId]. This is the debt as it actually
+  /// arose — you paid for dinner, they had a share of it — before [simplify]
+  /// reroutes anything. The two numbers answer different questions and both
+  /// are true: *what do I owe Sahil* is this one, and *who should pay whom to
+  /// end this with the fewest transfers* is the other.
+  ///
+  /// Summed over everyone else in the group this comes back to [yourBalance],
+  /// so the two readings can never disagree about the total.
+  int pairBalance(String meId, String otherId) {
+    var net = 0;
+    for (final e in expenses) {
+      if (e.payerId == meId) net += e.shares[otherId] ?? 0;
+      if (e.payerId == otherId) net -= e.shares[meId] ?? 0;
+    }
+    for (final s in settlements) {
+      // A claim is not a payment here either.
+      if (!s.clearsDebt) continue;
+      if (s.fromId == otherId && s.toId == meId) net -= s.amount;
+      if (s.fromId == meId && s.toId == otherId) net += s.amount;
+    }
+    return net;
+  }
+
+  /// What [other] owes *you* here. Positive means they owe you.
+  int pairBalanceWithYou(String otherId) {
+    final me = you?.id;
+    return me == null ? 0 : pairBalance(me, otherId);
+  }
+
+  /// Whether [simplify] is going to name a payment between two people who
+  /// never actually transacted — the case that needs saying out loud.
+  ///
+  /// True when somebody is asked to pay someone they owe nothing to directly.
+  /// It is the right answer arithmetically and a surprising one socially, so
+  /// the screen that shows it explains itself rather than looking wrong.
+  bool get simplifyReroutes {
+    for (final t in simplify(balances)) {
+      if (pairBalance(t.from, t.to) >= 0) return true;
+    }
+    return false;
+  }
+
   bool get isSettled => balances.values.every((v) => v == 0);
 
   /// Claims waiting on someone to say the money arrived.
@@ -536,6 +627,7 @@ class Group {
     'expenses': expenses.map((e) => e.toJson()).toList(),
     'settlements': settlements.map((s) => s.toJson()).toList(),
     'recurring': recurring.map((r) => r.toJson()).toList(),
+    'tombstones': tombstones.map((t) => t.toJson()).toList(),
     'createdAt': createdAt.toIso8601String(),
     'syncedAt': syncedAt?.toIso8601String(),
   };
@@ -549,6 +641,7 @@ class Group {
     expenses: (j['expenses'] as List? ?? []).map((e) => Expense.fromJson((e as Map).cast())).toList(),
     settlements: (j['settlements'] as List? ?? []).map((s) => Settlement.fromJson((s as Map).cast())).toList(),
     recurring: (j['recurring'] as List? ?? []).map((r) => Recurring.fromJson((r as Map).cast())).toList(),
+    tombstones: (j['tombstones'] as List? ?? []).map((t) => Tombstone.fromJson((t as Map).cast())).toList(),
     createdAt: _date(j['createdAt']),
     syncedAt: _date(j['syncedAt']),
   );

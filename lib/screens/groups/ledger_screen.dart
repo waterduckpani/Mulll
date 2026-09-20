@@ -6,7 +6,6 @@ import '../../data/models.dart';
 import '../../data/store.dart';
 import '../../ui/icons.dart';
 import '../../ui/page.dart';
-import '../../ui/sheet.dart';
 import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
 import 'group_sheets.dart';
@@ -161,52 +160,54 @@ class _Row extends StatelessWidget {
       haptic: false,
       semanticLabel: '$title, ${inr(amount)}, $caption',
       child: ExcludeSemantics(
-        child: Opacity(
-          opacity: dimmed ? .55 : 1,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 22),
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 18),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Flexible(
-                                  child: Text(
-                                    title,
-                                    style: ranade(16, color: c.ink),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
+        // Settled rows step back through ink weight, not opacity: fading the
+        // whole row took its caption under the contrast floor.
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 22),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 18),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  title,
+                                  style: ranade(16, color: dimmed ? c.ink2 : c.ink),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
-                                ?trailing,
-                              ],
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              caption,
-                              style: MullType.caption(c.ink3, size: 11.5),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
+                              ),
+                              ?trailing,
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            caption,
+                            style: MullType.caption(c.ink3, size: 11.5),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: 14),
-                      Text(inr(amount), style: MullType.listAmount(c.ink)),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(width: 14),
+                    Text(
+                      inr(amount),
+                      style: MullType.listAmount(dimmed ? c.ink2 : c.ink),
+                    ),
+                  ],
                 ),
-                const Hairline(),
-              ],
-            ),
+              ),
+              const Hairline(),
+            ],
           ),
         ),
       ),
@@ -273,37 +274,55 @@ class _SettlementRow extends StatelessWidget {
     final to = group.memberById(settlement.toId);
     String name(Member? m) => m == null ? 'Someone' : store.shortName(m);
 
+    final me = group.you?.id;
+    final yours = settlement.fromId == me || settlement.toId == me;
+
     return _Row(
-      title: settlement.status == SettlementStatus.confirmed
-          ? '${name(from)} paid ${name(to)}'
-          : '${name(from)} says they paid ${name(to)}',
+      title: switch (null) {
+        // An offset is not a payment and must not be dressed as one. Nothing
+        // left anybody's account; two debts pointing opposite ways cancelled.
+        _ when settlement.offset => '${name(from)} and ${name(to)} netted off',
+        _ when settlement.status == SettlementStatus.confirmed => '${name(from)} paid ${name(to)}',
+        _ => '${name(from)} says they paid ${name(to)}',
+      },
       caption: [
-        switch (settlement.status) {
-          SettlementStatus.confirmed => 'Confirmed',
-          SettlementStatus.pending => 'Waiting to be confirmed',
-          SettlementStatus.disputed => 'Not received',
-        },
+        if (settlement.offset)
+          'Cancelled against another ledger'
+        else
+          switch (settlement.status) {
+            SettlementStatus.confirmed => 'Confirmed',
+            SettlementStatus.pending => 'Waiting to be confirmed',
+            SettlementStatus.disputed => 'Not received',
+          },
         if (settlement.utr != null) 'UPI ref ${settlement.utr}',
         shortDate(settlement.date),
       ].join(' · '),
       amount: settlement.amount,
       dimmed: settlement.status == SettlementStatus.confirmed,
-      onTap: settlement.status == SettlementStatus.pending &&
-              settlement.toId == group.you?.id
-          ? () => showClaimCheck(context, group, settlement)
-          : null,
-      onLongPress: () {
-        store.removeSettlement(group, settlement);
-        Toast.show(
+      onTap: switch (null) {
+        // Waiting on you to say it arrived.
+        _ when settlement.status == SettlementStatus.pending && settlement.toId == me => () => showClaimCheck(
           context,
-          'Settlement removed',
-          action: 'Undo',
-          onAction: () {
-            group.settlements.add(settlement);
-            store.updateGroup(group);
-          },
-        );
+          group,
+          settlement,
+        ),
+        // You disputed it and it has since turned up.
+        _ when settlement.status == SettlementStatus.disputed && settlement.toId == me => () => showDisputedSettlement(
+          context,
+          group,
+          settlement,
+        ),
+        // Your own claim, waiting on them or refused by them.
+        _ when settlement.status != SettlementStatus.confirmed && settlement.fromId == me => () => showOwnClaim(
+          context,
+          group,
+          settlement,
+        ),
+        // Anything else of yours: the only thing left to do is take it off.
+        _ when yours => () => confirmRemoveSettlement(context, group, settlement),
+        _ => null,
       },
+      onLongPress: yours ? () => confirmRemoveSettlement(context, group, settlement) : null,
     );
   }
 }

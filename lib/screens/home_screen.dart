@@ -1,11 +1,8 @@
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/services.dart';
 
 import '../core/dates.dart';
 import '../core/money.dart';
-import '../core/upi.dart';
 import '../data/models.dart';
-import '../data/remote/notices_service.dart';
 import '../data/store.dart';
 import '../ui/group_icons.dart';
 import '../ui/icons.dart';
@@ -18,6 +15,8 @@ import 'groups/group_detail_screen.dart';
 import 'groups/group_sheets.dart';
 import 'groups/icon_picker.dart';
 import 'groups/recurring_sheets.dart';
+import 'groups/settle_up_screen.dart';
+import 'people_sheet.dart';
 
 /// Mull, all of it.
 ///
@@ -31,8 +30,13 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final store = context.store;
     final groups = store.namedGroups;
-    final people = store.directLedgers;
+    // Everyone you split with, netted across every ledger — not the one-to-one
+    // ledgers, which are only one of the places a person turns up. Somebody
+    // you owe on a trip and who owes you on the flat is one row here, in one
+    // direction, which is the question this screen exists to answer.
+    final people = store.standings;
     final claims = store.confirmationsForYou;
+    final waiting = store.claimsAwaitingOthers;
     final due = store.dueRecurring;
     final empty = store.groups.isEmpty;
 
@@ -53,7 +57,7 @@ class HomeScreen extends StatelessWidget {
     // so with one or two ledgers the row becomes a card with the icon, the
     // people and the balance in it. The moment there are several, the page has
     // a real job to do and the rows tighten up to let you scan them.
-    final density = switch (groups.length + people.length) {
+    final density = switch (groups.length) {
       1 => _Density.roomy,
       2 || 3 => _Density.medium,
       _ => _Density.compact,
@@ -90,6 +94,13 @@ class HomeScreen extends StatelessWidget {
                   settlement: settlement,
                   lift: claim(),
                 ),
+              for (final (group, settlement) in waiting)
+                _WaitingClaimCard(
+                  key: ValueKey('waiting-${settlement.id}'),
+                  group: group,
+                  settlement: settlement,
+                  lift: claim(),
+                ),
               for (final (group, schedule) in due)
                 _DueCard(
                   key: ValueKey(schedule.id),
@@ -118,48 +129,194 @@ class HomeScreen extends StatelessWidget {
               if (people.isNotEmpty) ...[
                 const Eyebrow('People', padding: EdgeInsets.fromLTRB(Gutter.text, 36, Gutter.text, 0)),
                 const SizedBox(height: 14),
-                Stacked(
-                  padding: const EdgeInsets.symmetric(horizontal: Gutter.card),
-                  children: [
-                    for (final g in people)
-                      // People stay compact whatever the groups are doing.
-                      // A one-to-one ledger has a name and a number and
-                      // nothing else to show, so the roomy card would just be
-                      // a compact one with air around it.
-                      _LedgerRow(
-                        key: ValueKey(g.id),
-                        group: g,
-                        density: _Density.compact,
-                        onTap: () => open(g),
-                      ),
-                  ],
+                Surface(
+                  lift: Lift.card,
+                  radius: 26,
+                  margin: const EdgeInsets.symmetric(horizontal: Gutter.card),
+                  padding: const EdgeInsets.fromLTRB(22, 4, 18, 4),
+                  child: CardRows(
+                    children: [
+                      for (final standing in people) PersonRow(key: ValueKey(standing.member.id), standing: standing),
+                    ],
+                  ),
                 ),
               ],
-              const _Waiting(),
+              const _Footer(),
             ],
     );
   }
 }
 
-/// "You owe, all in / ₹3,850".
+/// "You owe, all in / ₹3,850", and then both halves of it.
+///
+/// The net on its own was half an answer. ₹3,850 reads as a small tidy debt
+/// and can just as easily be ₹12,000 coming to you against ₹15,850 going out —
+/// two facts you would act on completely differently. So when both directions
+/// exist, both are said, and the line is tappable through to the names.
 class _Headline extends StatelessWidget {
   const _Headline();
 
   @override
   Widget build(BuildContext context) {
+    final c = context.c;
     final store = context.store;
     final net = store.netAcrossAll;
+    final owed = store.totalOwedToYou;
+    final owing = store.totalYouOwe;
+    final bothWays = owed > 0 && owing > 0;
 
     final caption = switch (net) {
-      0 => 'All square',
+      0 => bothWays ? 'Square, all in' : 'All square',
       > 0 => "You're owed, all in",
       _ => 'You owe, all in',
     };
 
-    return HeroAmount(
-      caption: caption,
-      amount: net == 0 ? null : net.abs(),
-      placeholder: 'Nobody owes\nanybody.',
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        HeroAmount(
+          caption: caption,
+          amount: net == 0 ? null : net.abs(),
+          placeholder: bothWays ? 'It all\ncancels out.' : 'Nobody owes\nanybody.',
+        ),
+        if (bothWays)
+          Pressable(
+            onTap: () => _openWhoOwesWho(context),
+            scale: .99,
+            semanticLabel: 'Owed to you ${inr(owed)}, you owe ${inr(owing)}. Open who owes who.',
+            child: ExcludeSemantics(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(Gutter.text, 14, Gutter.text, 0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${inr(owed)} owed to you · ${inr(owing)} you owe',
+                        style: MullType.caption(c.ink3, size: 12.5),
+                      ),
+                    ),
+                    MullIcon(MullGlyph.chevronRight, size: 13, color: c.ink3, strokeWidth: 1.8),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Opens the both-directions list, and follows it into a ledger if one was
+/// tapped down there.
+Future<void> _openWhoOwesWho(BuildContext context) async {
+  final navigator = Navigator.of(context);
+  final store = context.readStore;
+  final groupId = await showWhoOwesWhat(context);
+  if (groupId == null) return;
+  final group = store.groupById(groupId);
+  if (group == null) return;
+  await navigator.push(
+    CupertinoPageRoute(builder: (_) => GroupDetailScreen(groupId: group.id)),
+  );
+}
+
+/// The line at the end of the list.
+class _Footer extends StatelessWidget {
+  const _Footer();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final store = context.store;
+    final people = store.standings.where((s) => !s.isSquare).length;
+    if (people == 0) return const SizedBox(height: 12);
+
+    return Pressable(
+      onTap: () => _openWhoOwesWho(context),
+      semanticLabel: 'Who owes who, across $people people',
+      child: ExcludeSemantics(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(Gutter.text, 30, Gutter.text, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  people == 1 ? 'One person to square up with' : '$people people to square up with',
+                  style: MullType.caption(c.ink3, size: 12.5),
+                ),
+              ),
+              Text('Who owes who', style: ranade(12.5, color: c.ink2)),
+              const SizedBox(width: 6),
+              MullIcon(MullGlyph.chevronRight, size: 13, color: c.ink3, strokeWidth: 1.8),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A claim *you* made that the other person has not answered.
+///
+/// The other half of the confirm loop, and it used to be invisible: you said
+/// you had paid, and if they never confirmed, nothing anywhere told you so.
+/// The money had left your account and the debt was still on your balance,
+/// with no way to find out why short of opening the group and reading the
+/// settlements tab.
+class _WaitingClaimCard extends StatelessWidget {
+  const _WaitingClaimCard({
+    super.key,
+    required this.group,
+    required this.settlement,
+    required this.lift,
+  });
+
+  final Group group;
+  final Settlement settlement;
+  final Lift lift;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    final store = context.store;
+    final to = group.memberById(settlement.toId);
+    if (to == null) return const SizedBox.shrink();
+    final disputed = settlement.status == SettlementStatus.disputed;
+
+    return Surface(
+      lift: lift,
+      radius: 28,
+      margin: const EdgeInsets.fromLTRB(Gutter.card, 10, Gutter.card, 0),
+      padding: const EdgeInsets.fromLTRB(22, 18, 16, 18),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  disputed
+                      ? '${store.shortName(to)} has not seen your ${inr(settlement.amount)}'
+                      : '${store.shortName(to)} has not confirmed your ${inr(settlement.amount)}',
+                  style: ranade(16, height: 1.35, color: c.ink),
+                  maxLines: 2,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${group.title} · claimed ${daysAgo(settlement.date, store.now())}',
+                  style: MullType.caption(c.ink3, size: 11.5),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          InlineButton(
+            'Open it',
+            height: 48,
+            onTap: () => showOwnClaim(context, group, settlement),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -352,7 +509,10 @@ Future<void> showHowItWorks(BuildContext context) => showMullSheet(
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(width: 34, child: Text(number, style: excon(20, color: c.ink3))),
+          SizedBox(
+            width: 34,
+            child: Text(number, style: excon(20, color: c.ink3)),
+          ),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -573,21 +733,22 @@ class _LedgerRow extends StatelessWidget {
     // trip, you owe, two thousand four hundred" spread over four stops.
     Widget wrap(Widget child, {required double radius, required EdgeInsets padding}) => Semantics(
       button: true,
-      label: amount == null
-          ? '${group.title}, settled up'
-          : '${group.title}, $label ${inr(amount)}',
+      label: amount == null ? '${group.title}, settled up' : '${group.title}, $label ${inr(amount)}',
       child: ExcludeSemantics(
         child: Pressable(
           onTap: onTap,
           onLongPress: () => showLedgerActions(context, group),
           scale: .985,
-          child: Opacity(
-            opacity: settled ? .55 : 1,
-            child: Container(
-              padding: padding,
-              decoration: surfaceOf(c, lift, radius: BorderRadius.circular(radius)),
-              child: child,
-            ),
+          // A settled ledger recedes by sitting flatter and saying "settled
+          // up", not by being faded out. Wrapping the row in Opacity took
+          // every caption on it to 2.6:1 against the screen, well under the
+          // 4.5:1 this design went to some trouble to clear everywhere else —
+          // and the rule here has always been that hierarchy is how high a
+          // surface floats.
+          child: Container(
+            padding: padding,
+            decoration: surfaceOf(c, lift, radius: BorderRadius.circular(radius)),
+            child: child,
           ),
         ),
       ),
@@ -685,42 +846,6 @@ class _LedgerRow extends StatelessWidget {
   }
 }
 
-/// The quiet line at the end of the list.
-class _Waiting extends StatelessWidget {
-  const _Waiting();
-
-  @override
-  Widget build(BuildContext context) {
-    final store = context.store;
-    final owed = store.owedToYou;
-    final c = context.c;
-    if (owed.isEmpty) return const SizedBox(height: 12);
-
-    final total = owed.fold(0, (s, o) => s + o.amount);
-    return Pressable(
-      onTap: () => showWhoOwesYou(context),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(Gutter.text, 30, Gutter.text, 4),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                owed.length == 1
-                    ? '${store.shortName(owed.first.member)} owes you ${inr(total)}'
-                    : '${owed.length} people owe you ${inr(total)}',
-                style: MullType.caption(c.ink3, size: 12.5),
-              ),
-            ),
-            Text('Remind', style: ranade(12.5, color: c.ink2)),
-            const SizedBox(width: 6),
-            MullIcon(MullGlyph.chevronRight, size: 13, color: c.ink3, strokeWidth: 1.8),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 /// Long-press on a ledger row.
 Future<void> showLedgerActions(BuildContext context, Group group) {
   final store = context.readStore;
@@ -744,6 +869,23 @@ Future<void> showLedgerActions(BuildContext context, Group group) {
             CardRows(
               children: [
                 SheetAction('Add an expense', onTap: () => run(() => showAddExpense(context, group))),
+                // The thing people most often came here to do, and the one
+                // action this menu did not offer. Settling was four screens
+                // deep with no shortcut to it anywhere.
+                if (!group.isSettled)
+                  SheetAction(
+                    'Settle up',
+                    detail: switch (group.yourBalance) {
+                      0 => null,
+                      > 0 => 'you get back ${inr(group.yourBalance)}',
+                      _ => 'you owe ${inr(-group.yourBalance)}',
+                    },
+                    onTap: () => run(
+                      () => Navigator.of(context).push(
+                        CupertinoPageRoute(builder: (_) => SettleUpScreen(groupId: group.id)),
+                      ),
+                    ),
+                  ),
                 SheetAction(
                   'Send summary on WhatsApp',
                   onTap: () => run(() => shareGroupSummary(context, group)),
@@ -768,161 +910,4 @@ Future<void> showLedgerActions(BuildContext context, Group group) {
       );
     },
   );
-}
-
-/// Everyone who owes you, netted per person, with a nudge against each.
-Future<void> showWhoOwesYou(BuildContext context) => showMullSheet(
-  context,
-  height: (280 + context.readStore.owedToYou.length * 78).clamp(340, 680).toDouble(),
-  builder: (_) => const _OwedSheet(),
-);
-
-class _OwedSheet extends StatelessWidget {
-  const _OwedSheet();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    final store = context.store;
-    final owed = store.owedToYou;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SheetHeader('Waiting on'),
-        Expanded(
-          child: ListView(
-            physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(Gutter.text, 12, Gutter.text, 24),
-            children: [
-              Text(
-                'Netted per person, so a friend you have been to three dinners '
-                'with is chased once.',
-                style: MullType.caption(c.ink3),
-              ),
-              const SizedBox(height: 20),
-              if (owed.isEmpty)
-                Text('Nobody owes you anything.', style: ranade(15, color: c.ink2))
-              else
-                CardRows(
-                  children: [for (final o in owed) _OwedRow(key: ValueKey(o.member.id), owing: o)],
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _OwedRow extends StatelessWidget {
-  const _OwedRow({super.key, required this.owing});
-
-  final Owing owing;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.c;
-    final store = context.store;
-    final ready = store.canNudge(owing);
-    final last = owing.lastNudgedAt;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(store.shortName(owing.member), style: ranade(16, color: c.ink)),
-                const SizedBox(height: 3),
-                Text(
-                  [
-                    inr(owing.amount),
-                    owing.groups.length == 1
-                        ? owing.groups.first.title
-                        : '${owing.groups.length} ledgers',
-                    if (last != null) 'nudged ${daysAgo(last, store.now())}',
-                  ].join(' · '),
-                  style: MullType.caption(c.ink3, size: 11.5),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          Opacity(
-            opacity: ready ? 1 : .35,
-            child: InlineButton(
-              'Remind',
-              filled: false,
-              onTap: ready ? () => nudge(context, owing) : null,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Chases someone inside Mull.
-///
-/// This used to open WhatsApp with the message pre-written, which was the one
-/// feature guaranteeing the ledger stayed in the chat — the whole point of the
-/// app is that it does not. So a reminder is a notification now, to their copy
-/// of Mull, from the person they actually owe.
-///
-/// Someone who is not on Mull has no inbox to send to, and for them WhatsApp
-/// is still the honest answer rather than a dead button.
-Future<void> nudge(BuildContext context, Owing owing) async {
-  final store = context.readStore;
-  final message = store.nudgeMessage(owing);
-  HapticFeedback.mediumImpact();
-
-  final userId = owing.member.userId;
-  if (userId == null) {
-    final sent = await shareOnWhatsApp(message, phone: owing.member.phone);
-    if (!context.mounted) return;
-    if (sent) {
-      store.markNudged(owing);
-      Toast.show(context, '${store.shortName(owing.member)} is not on Mull — sent on WhatsApp');
-    } else {
-      Toast.show(context, "Couldn't open WhatsApp");
-    }
-    return;
-  }
-
-  final outcome = await NoticesService.remind(
-    toUserId: userId,
-    groupId: owing.groups.length == 1 ? owing.groups.first.id : null,
-    title: '${store.profile.name.trim().split(' ').first} is waiting on ${inr(owing.amount)}',
-    body: owing.groups.length == 1
-        ? owing.groups.first.title
-        : 'Across ${owing.groups.length} ledgers',
-    amount: owing.amount,
-  );
-  if (!context.mounted) return;
-
-  switch (outcome) {
-    case ReminderOutcome.sent:
-      // Only counted locally once the server took it, so a failed send does
-      // not spend one of the two.
-      store.markNudged(owing);
-      final left = store.nudgesLeft(owing);
-      Toast.show(
-        context,
-        left > 0
-            ? 'Nudged ${store.shortName(owing.member)} · one more today'
-            : 'Nudged ${store.shortName(owing.member)}',
-      );
-    case ReminderOutcome.outOfTurns:
-      // Make the local copy agree with the server rather than arguing with it.
-      // The count that matters is the one that was just enforced.
-      store.spendNudges(owing);
-      Toast.show(context, "That's both of today's nudges. Try again tomorrow.");
-    case ReminderOutcome.failed:
-      Toast.show(context, "Couldn't send that. Check your connection.");
-  }
 }

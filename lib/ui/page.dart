@@ -1,4 +1,4 @@
-import 'package:flutter/cupertino.dart' show CupertinoSliverRefreshControl, RefreshIndicatorMode;
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../data/notices.dart';
@@ -8,6 +8,7 @@ import '../screens/notices_sheet.dart';
 import '../screens/profile_sheet.dart';
 import 'tokens.dart';
 import 'widgets.dart';
+import '../screens/groups/group_detail_screen.dart';
 
 /// Layout constants shared by every page.
 ///
@@ -167,7 +168,14 @@ class _MullPageState extends State<MullPage> {
                       BrandBar(
                         initial: store.profile.initial,
                         onProfile: () => showProfileSheet(context),
-                        onFriends: () => showFriendsSheet(context),
+                        onFriends: () => showFriendsSheet(
+                          context,
+                          onOpenLedger: (id) => Navigator.of(context).push(
+                            CupertinoPageRoute(
+                              builder: (_) => GroupDetailScreen(groupId: id),
+                            ),
+                          ),
+                        ),
                         onNotices: inbox == null ? null : () => showNoticesSheet(context),
                         unread: inbox?.unread ?? 0,
                       ),

@@ -203,7 +203,9 @@ MullGlyph _glyph(NoticeKind kind) => switch (kind) {
   NoticeKind.reminder => MullGlyph.bell,
   NoticeKind.addedToGroup => MullGlyph.groups,
   NoticeKind.expenseAdded || NoticeKind.expenseRemoved => MullGlyph.plus,
+  NoticeKind.expenseChanged => MullGlyph.more,
   NoticeKind.settlementConfirmed => MullGlyph.check,
-  NoticeKind.settlementDisputed => MullGlyph.close,
+  NoticeKind.settlementDisputed || NoticeKind.settlementRemoved => MullGlyph.close,
   NoticeKind.settlementClaimed => MullGlyph.arrowUpRight,
+  NoticeKind.nettedOff => MullGlyph.repeat,
 };

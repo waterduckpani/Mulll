@@ -10,21 +10,35 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../data/remote/friends_service.dart';
+import '../data/store.dart';
 import '../ui/sheet.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
 
-Future<void> showFriendsSheet(BuildContext context) =>
-    showMullSheet(context, height: 720, builder: (_) => const _FriendsSheet());
+/// [onOpenLedger] is how a tapped friend gets you to the ledger with them.
+/// Supplied by the caller because this sheet sits above the navigator its
+/// screens live on, and pushing from here lands the group outside the shell.
+Future<void> showFriendsSheet(
+  BuildContext context, {
+  void Function(String groupId)? onOpenLedger,
+}) => showMullSheet(
+  context,
+  height: 720,
+  builder: (_) => _FriendsSheet(onOpenLedger: onOpenLedger),
+);
 
 class _FriendsSheet extends StatefulWidget {
-  const _FriendsSheet();
+  const _FriendsSheet({this.onOpenLedger});
+
+  final void Function(String groupId)? onOpenLedger;
 
   @override
   State<_FriendsSheet> createState() => _FriendsSheetState();
 }
 
 class _FriendsSheetState extends State<_FriendsSheet> {
+  void Function(String groupId)? get openLedger => widget.onOpenLedger;
+
   List<Friend>? _friends;
   bool _busy = false;
 
@@ -42,6 +56,25 @@ class _FriendsSheetState extends State<_FriendsSheet> {
   Future<void> _add() async {
     final sent = await showAddFriendSheet(context);
     if (sent == true) await _load();
+  }
+
+  /// Opens the one-to-one ledger with a friend, making it if it is new.
+  ///
+  /// There was no way to start one from here at all: a direct ledger could
+  /// only be created by going into "start a group" and switching it to one
+  /// person, which is a strange route to "I covered Ritu's cab".
+  void _splitWith(Friend friend) {
+    final store = context.readStore;
+    final group = store.directWith(
+      name: friend.label,
+      userId: friend.userId,
+      email: friend.email,
+      upiId: friend.upiId,
+    );
+    Navigator.of(context).pop();
+    Future.delayed(const Duration(milliseconds: 160), () {
+      if (mounted) openLedger?.call(group.id);
+    });
   }
 
   Future<void> _act(Future<FriendsResult> Function() action) async {
@@ -88,6 +121,7 @@ class _FriendsSheetState extends State<_FriendsSheet> {
                         busy: _busy,
                         onAccept: () => _act(() => FriendsService.accept(friend.friendshipId)),
                         onRemove: () => _act(() => FriendsService.remove(friend.friendshipId)),
+                        onSplit: friend.state == FriendState.friends ? () => _splitWith(friend) : null,
                       ),
                       const SizedBox(height: 4),
                     ],
@@ -109,12 +143,17 @@ class _FriendRow extends StatelessWidget {
     required this.busy,
     required this.onAccept,
     required this.onRemove,
+    this.onSplit,
   });
 
   final Friend friend;
   final bool busy;
   final VoidCallback onAccept;
   final VoidCallback onRemove;
+
+  /// Open the one-to-one ledger with them. Null until you are actually
+  /// friends — there is nothing to split with a request.
+  final VoidCallback? onSplit;
 
   @override
   Widget build(BuildContext context) {
@@ -132,51 +171,56 @@ class _FriendRow extends StatelessWidget {
       FriendState.friends => (friend.upiId ?? 'No UPI ID on their account yet', null),
     };
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      child: Row(
-        children: [
-          Container(
-            width: 38,
-            height: 38,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(color: c.quiet, shape: BoxShape.circle),
-            child: Text(friend.initials, style: excon(14, color: c.ink)),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  friend.label,
-                  style: ranade(15, color: c.ink),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  note,
-                  style: ranade(12, color: c.ink3),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+    return Pressable(
+      onTap: busy ? null : onSplit,
+      scale: onSplit == null ? 1 : .99,
+      semanticLabel: onSplit == null ? null : 'Split with ${friend.label}',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: c.quiet, shape: BoxShape.circle),
+              child: Text(friend.initials, style: excon(14, color: c.ink)),
             ),
-          ),
-          if (action != null) ...[
-            ChipButton(action, onTap: busy ? null : onAccept),
-            const SizedBox(width: 8),
-          ],
-          Pressable(
-            onTap: busy ? null : onRemove,
-            child: Padding(
-              padding: const EdgeInsets.all(6),
-              child: Text(
-                friend.state == FriendState.friends ? 'Remove' : 'Cancel',
-                style: ranade(12.5, color: c.ink3),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    friend.label,
+                    style: ranade(15, color: c.ink),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    note,
+                    style: ranade(12, color: c.ink3),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               ),
             ),
-          ),
-        ],
+            if (action != null) ...[
+              ChipButton(action, onTap: busy ? null : onAccept),
+              const SizedBox(width: 8),
+            ],
+            Pressable(
+              onTap: busy ? null : onRemove,
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Text(
+                  friend.state == FriendState.friends ? 'Remove' : 'Cancel',
+                  style: ranade(12.5, color: c.ink3),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

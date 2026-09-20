@@ -225,7 +225,15 @@ class _MemberRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.c;
     final store = context.store;
-    final balance = group.balances[member.id] ?? 0;
+    // What they owe *you* here, not what they owe the group.
+    //
+    // "Sahil is owed ₹1,600" was the group's number against a name, which
+    // almost everyone read as being about them and you. It can point the
+    // opposite way to the truth: Sahil can be owed by the group while owing
+    // you directly, and the screen said so with a straight face.
+    final balance = member.isYou
+        ? group.yourBalance
+        : group.pairBalanceWithYou(member.id);
 
     final standing = switch (null) {
       _ when !member.isYou && !member.isLinked => 'Not on Mull yet',
@@ -295,7 +303,9 @@ class _MemberRow extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    balance > 0 ? 'is owed' : 'owes',
+                    member.isYou
+                        ? (balance > 0 ? 'you get back' : 'you owe')
+                        : (balance > 0 ? 'owes you' : 'you owe them'),
                     style: MullType.caption(c.ink3, size: 11),
                   ),
                   const SizedBox(height: 1),

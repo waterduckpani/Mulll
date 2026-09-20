@@ -62,9 +62,32 @@ class SplitModel extends ChangeNotifier {
 
   SplitMethod _method;
   SplitMethod get method => _method;
+
+  /// Changing method carries the *same* split across, rather than leaving two
+  /// disagreeing descriptions of it behind.
+  ///
+  /// Who is in a split is said two different ways: a tick in Equally, a number
+  /// in the other three. They used to drift apart — tick somebody out, switch
+  /// to Exact, and the amount still sitting in their field put them quietly
+  /// back in, which is the precise opposite of what the tick had just said.
   set method(SplitMethod value) {
     if (_method == value) return;
+    final wasEqual = _method == SplitMethod.equal;
     _method = value;
+
+    if (wasEqual) {
+      // Leaving Equally: anyone ticked out has no business keeping a number.
+      for (final m in group.members) {
+        if (!included.contains(m.id)) weights[m.id]!.text = '';
+      }
+    } else if (value == SplitMethod.equal) {
+      // Arriving at Equally: the ticks should say what the numbers said.
+      final withValue = {
+        for (final m in group.members)
+          if ((_weightOf(m.id) ?? 0) > 0) m.id,
+      };
+      included = withValue.isEmpty ? group.members.map((m) => m.id).toSet() : withValue;
+    }
     notifyListeners();
   }
 
@@ -112,8 +135,23 @@ class SplitModel extends ChangeNotifier {
         // split, so it stays invalid until the numbers agree.
         return out.values.fold(0, (s, v) => s + v) == _amount ? out : const {};
 
-      case SplitMethod.shares:
       case SplitMethod.percent:
+        final w = <String, num>{};
+        for (final m in group.members) {
+          final value = _weightOf(m.id);
+          if (value != null && value > 0) w[m.id] = value;
+        }
+        if (w.isEmpty) return const {};
+        // Percentages have to be percentages.
+        //
+        // These went through the same weighting as shares, which normalises —
+        // so 30 and 30 quietly became half each and the line underneath said
+        // "Split by percentage" with a straight face. Nobody typing 30 means
+        // 50. A percent split that does not come to 100 is a mistake being
+        // made, and the only useful thing to do with it is say so.
+        return _percentTotal(w) == 100 ? splitByWeight(_amount, w) : const {};
+
+      case SplitMethod.shares:
         final w = <String, num>{};
         for (final m in group.members) {
           final value = _weightOf(m.id);
@@ -121,6 +159,21 @@ class SplitModel extends ChangeNotifier {
         }
         return w.isEmpty ? const {} : splitByWeight(_amount, w);
     }
+  }
+
+  /// Rounded to a whole percent, so 33.33 three times counts as 100 rather
+  /// than failing on a third of a rupee nobody can type.
+  static int _percentTotal(Map<String, num> weights) =>
+      weights.values.fold<double>(0, (s, w) => s + w.toDouble()).round();
+
+  /// What the percent fields currently add up to.
+  int get percentEntered {
+    final w = <String, num>{};
+    for (final m in group.members) {
+      final value = _weightOf(m.id);
+      if (value != null && value > 0) w[m.id] = value;
+    }
+    return _percentTotal(w);
   }
 
   bool get isValid => shares.isNotEmpty;
@@ -148,6 +201,13 @@ class SplitModel extends ChangeNotifier {
       return left > 0 ? '${inr(left)} still to assign.' : '${inr(-left)} over the total.';
     }
     if (_method == SplitMethod.equal) return 'Nobody is in this split.';
+    if (_method == SplitMethod.percent) {
+      final entered = percentEntered;
+      if (entered == 0) return 'Give at least one person a percentage.';
+      return entered < 100
+          ? '${100 - entered}% still to go.'
+          : '${entered - 100}% over.';
+    }
     return 'Give at least one person a number.';
   }
 

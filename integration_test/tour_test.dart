@@ -152,16 +152,41 @@ void main() {
     await back(t);
     await back(t);
 
-    // ---- chasing the people who owe you
+    // ---- where you stand with everyone, both directions
+    //
+    // Entered from the line under the headline rather than the one at the foot
+    // of the list: the footer sits beneath the floating button, so it is in
+    // the tree but not hit-testable, and a finder there fails with "no
+    // element" rather than anything that points at the button on top of it.
+    // Back to the top first: `tapText` scrolls to reach things, so the home
+    // screen is wherever the last one left it and the headline may be above
+    // the fold.
+    await t.drag(find.byType(Scrollable).last, const Offset(0, 900));
+    await settle(t, 800);
+    // By the text of the line, not its semantics label: the label merges with
+    // the hero amount above it into one node covering both, so tapping that
+    // node's centre lands on the number rather than the row.
+    await t.tap(find.textContaining('owed to you').hitTestable().last);
+    await settle(t, 900);
+    // Asserted, not assumed. A tap that lands on nothing still passes, and the
+    // only evidence would be a screenshot nobody opens.
+    expect(find.text('WHO OWES WHO'), findsOneWidget);
+    await shot(t, '12-who-owes-who');
+    await dismissSheet(t);
+
+    // ---- one person, netted across every ledger they are in
     //
     // A drag rather than ensureVisible: a ListView builds its children lazily,
     // so a row below the fold is not in the tree for a finder to find yet.
-    await t.drag(find.byType(Scrollable).last, const Offset(0, -420));
+    await t.drag(find.byType(Scrollable).last, const Offset(0, -520));
     await settle(t, 800);
-    await t.tap(find.text('Remind').hitTestable().last);
-    await settle(t);
-    await shot(t, '12-waiting-on');
+    await t.tap(find.text('Sahil').hitTestable().last);
+    await settle(t, 900);
+    expect(find.text('ACROSS'), findsOneWidget);
+    await shot(t, '12b-one-person');
     await dismissSheet(t);
+    await t.drag(find.byType(Scrollable).last, const Offset(0, 520));
+    await settle(t, 800);
 
     // ---- 4B and 4C, starting something new
     await tapText(t, 'Start a group');

@@ -151,6 +151,31 @@ class MullStore extends ChangeNotifier {
     _commit();
   }
 
+  /// Records that a row was deleted here, so the push can say so.
+  ///
+  /// An upsert cannot express a deletion — it only ever says "this row
+  /// exists" — so without this the row lived on server-side and the next pull
+  /// handed it straight back, moving everyone's balance with it.
+  void _tombstone(Group group, String id, TombstoneKind kind) {
+    if (group.tombstones.any((t) => t.id == id && t.kind == kind)) return;
+    group.tombstones.add(Tombstone(id: id, kind: kind));
+  }
+
+  /// Undo, before the delete has been anywhere. Takes the tombstone back off
+  /// rather than letting a push chase a row that is on screen again.
+  void _untombstone(Group group, String id, TombstoneKind kind) {
+    group.tombstones.removeWhere((t) => t.id == id && t.kind == kind);
+  }
+
+  /// The sync saying it has passed these on. Dropping them here is safe: the
+  /// row is soft-deleted server-side now, so no pull can bring it back.
+  void clearTombstones(Group group, Iterable<Tombstone> applied) {
+    if (applied.isEmpty) return;
+    final done = {for (final t in applied) '${t.kind.name}:${t.id}'};
+    group.tombstones.removeWhere((t) => done.contains('${t.kind.name}:${t.id}'));
+    _commit();
+  }
+
   // ---------------------------------------------------------------- lifecycle
 
   static Future<MullStore> load() async {
@@ -419,14 +444,23 @@ class MullStore extends ChangeNotifier {
   /// One-to-one ledgers, under PEOPLE.
   List<Group> get directLedgers => _ordered(groups.where((g) => g.isDirect));
 
-  /// Biggest open amount first; anything settled sinks to the bottom.
+  /// What you owe first, then what you are owed, then whatever is settled.
   ///
   /// Not newest-first, and not by last activity. The home screen is a list of
   /// things to deal with, and the ₹6,250 you owe on the flat is more of a thing
   /// to deal with than the trip that ended square — even if somebody confirmed
   /// a payment on the trip an hour ago. Settled ledgers stay visible, because
   /// they are still who you split with, but they stop competing for the top.
+  ///
+  /// Sorted by direction before size, because sorting on the size alone put a
+  /// ₹500 debt of yours above a ₹400 someone owes you and then swapped the two
+  /// the moment either moved. A list whose rows change places while you are
+  /// reading it is a list you stop trusting; money you owe is also the more
+  /// urgent half, so it goes on top and stays there.
   List<Group> _ordered(Iterable<Group> of) => [...of]..sort((a, b) {
+    int rank(Group g) => switch (g.yourBalance) { < 0 => 0, > 0 => 1, _ => 2 };
+    final byDirection = rank(a).compareTo(rank(b));
+    if (byDirection != 0) return byDirection;
     final byAmount = b.yourBalance.abs().compareTo(a.yourBalance.abs());
     if (byAmount != 0) return byAmount;
     return b.createdAt.compareTo(a.createdAt);
@@ -522,6 +556,7 @@ class MullStore extends ChangeNotifier {
   bool removeMember(Group group, Member member) {
     if (!canRemoveMember(group, member)) return false;
     group.members.removeWhere((m) => m.id == member.id);
+    _tombstone(group, member.id, TombstoneKind.member);
     _commitGroup(group);
     return true;
   }
@@ -563,9 +598,13 @@ class MullStore extends ChangeNotifier {
     final you = group.you;
     if (you == null || whyYouCannotLeave(group) != null) return false;
     group.members.removeWhere((m) => m.id == you.id);
+    // Your seat has to be deleted on the server too, or the group is handed
+    // straight back by the next pull and leaving does nothing at all. The push
+    // below carries the tombstone while the group is still in hand.
+    _tombstone(group, you.id, TombstoneKind.member);
     _commitGroup(group);
     // Gone from this phone as well: without a seat in it there is nothing here
-    // to see, and the next pull would not return it anyway.
+    // to see, and the next pull will not return it.
     groups.removeWhere((g) => g.id == group.id);
     _commit();
     return true;
@@ -649,16 +688,64 @@ class MullStore extends ChangeNotifier {
     );
   }
 
-  void updateExpense(Group group, Expense expense) => _commitGroup(group);
+  /// An edit is a balance change for everyone in the split, so it is
+  /// announced like one.
+  ///
+  /// Adding an expense told people and changing one did not, which meant a
+  /// ₹500 dinner could become a ₹5,000 one and the only sign was a number
+  /// moving on somebody's home screen. The whole claim-and-confirm design
+  /// rests on nothing about the money changing quietly.
+  void updateExpense(Group group, Expense expense, {Expense? before}) {
+    _commitGroup(group);
+    final payer = group.memberById(expense.payerId);
+    final to = _reachable(group, {
+      expense.payerId,
+      ...expense.shares.keys,
+      if (before != null) before.payerId,
+      if (before != null) ...before.shares.keys,
+    });
+    if (to.isEmpty || payer == null) return;
+    final amountMoved = before != null && before.amount != expense.amount;
+    _tell(
+      Notice(
+        to: to,
+        groupId: group.id,
+        kind: NoticeKind.expenseChanged,
+        title: '${_theirNameFor(group.you ?? payer)} changed ${expense.description}',
+        body: amountMoved
+            ? '${inr(before.amount)} → ${inr(expense.amount)} · ${group.isDirect ? 'with you' : group.title}'
+            : '${inr(expense.amount)} · ${group.isDirect ? 'with you' : group.title}',
+        amount: expense.amount,
+      ),
+    );
+  }
+
+  /// Everyone an expense used to involve, told that it is gone.
+  Notice? _expenseGoneNotice(Group group, Expense expense) {
+    final to = _reachable(group, {expense.payerId, ...expense.shares.keys});
+    final payer = group.memberById(expense.payerId);
+    if (to.isEmpty || payer == null) return null;
+    return Notice(
+      to: to,
+      groupId: group.id,
+      kind: NoticeKind.expenseRemoved,
+      title: '${_theirNameFor(group.you ?? payer)} deleted ${expense.description}',
+      body: '${inr(expense.amount)} · ${group.isDirect ? 'with you' : group.title}',
+      amount: expense.amount,
+    );
+  }
 
   void removeExpense(Group group, Expense expense) {
     group.expenses.removeWhere((e) => e.id == expense.id);
+    _tombstone(group, expense.id, TombstoneKind.expense);
     _commitGroup(group);
+    _tell(_expenseGoneNotice(group, expense));
   }
 
   void restoreExpense(Group group, Expense expense) {
     if (group.expenses.any((e) => e.id == expense.id)) return;
     group.expenses.add(expense);
+    _untombstone(group, expense.id, TombstoneKind.expense);
     _commitGroup(group);
   }
 
@@ -696,6 +783,7 @@ class MullStore extends ChangeNotifier {
 
   void removeRecurring(Group group, Recurring schedule) {
     group.recurring.removeWhere((r) => r.id == schedule.id);
+    _tombstone(group, schedule.id, TombstoneKind.recurring);
     // The expenses it already produced are real money that changed hands, so
     // they stay. They simply stop belonging to a schedule.
     for (final e in group.expenses) {
@@ -707,6 +795,7 @@ class MullStore extends ChangeNotifier {
   void restoreRecurring(Group group, Recurring schedule) {
     if (group.recurring.any((r) => r.id == schedule.id)) return;
     group.recurring.add(schedule);
+    _untombstone(group, schedule.id, TombstoneKind.recurring);
     _commitGroup(group);
   }
 
@@ -856,6 +945,186 @@ class MullStore extends ChangeNotifier {
     return settlement;
   }
 
+  /// Everything still waiting on somebody, in either direction.
+  ///
+  /// A disputed claim counts. It used to fall out of every list the moment it
+  /// was disputed — not pending, not confirmed — so the payer was told once,
+  /// in a notification they could miss, and then it was as if nothing had
+  /// happened. A disagreement about money is the last thing an app should be
+  /// quiet about.
+  List<(Group, Settlement)> get openClaims => [
+    for (final g in groups)
+      for (final s in g.settlements)
+        if (s.status != SettlementStatus.confirmed) (g, s),
+  ];
+
+  /// Claims you made that the other person has not answered, and the ones
+  /// they have said never arrived. The half of the loop Mull never showed.
+  List<(Group, Settlement)> get claimsAwaitingOthers => [
+    for (final (g, s) in openClaims)
+      if (s.fromId == g.you?.id) (g, s),
+  ];
+
+  // ------------------------------------------------- settling with a person
+
+  /// Each ledger you share with someone, and what it is worth between the two
+  /// of you. Positive means they owe you there.
+  List<(Group, int)> ledgersWith(Standing standing) {
+    final out = <(Group, int)>[];
+    for (final group in groups) {
+      final me = group.you?.id;
+      final seat = standing.seats[group.id];
+      if (me == null || seat == null) continue;
+      final amount = group.pairBalance(me, seat);
+      if (amount != 0) out.add((group, amount));
+    }
+    // Biggest first, so a payment clears whole ledgers rather than leaving a
+    // trail of small remainders behind it.
+    out.sort((a, b) => b.$2.abs().compareTo(a.$2.abs()));
+    return out;
+  }
+
+  /// Whether this person has debts pointing both ways that could cancel.
+  bool canNetOff(Standing standing) {
+    final ledgers = ledgersWith(standing);
+    return ledgers.any((l) => l.$2 > 0) && ledgers.any((l) => l.$2 < 0);
+  }
+
+  /// What would cancel if you netted off — the money neither of you has to
+  /// send.
+  int netOffAmount(Standing standing) {
+    final up = ledgersWith(standing).where((l) => l.$2 > 0).fold(0, (s, l) => s + l.$2);
+    final down = ledgersWith(standing).where((l) => l.$2 < 0).fold(0, (s, l) => s - l.$2);
+    return up < down ? up : down;
+  }
+
+  /// Cancels equal and opposite debts with one person, across ledgers.
+  ///
+  /// This is the arithmetic everybody does in their head and no split app was
+  /// doing for them. You owe Ananya 2,000 on the trip, she owes you 3,000 on
+  /// the flat; nobody sends 5,000 in two directions, they send 1,000 once. The
+  /// two 2,000s are written into both ledgers as offsets so each one is
+  /// honestly square, and what is left is a single real payment.
+  ///
+  /// Confirmed on the spot, and it is the one place that is right to do so: no
+  /// money is claimed to have moved, and neither person's net position changes
+  /// by a rupee. There is nothing for the other side to verify.
+  List<Settlement> netOff(Standing standing) {
+    final owed = [for (final l in ledgersWith(standing)) if (l.$2 > 0) l];
+    final owing = [for (final l in ledgersWith(standing)) if (l.$2 < 0) (l.$1, -l.$2)];
+    final written = <Settlement>[];
+    var i = 0;
+    var j = 0;
+    var credit = owed.isEmpty ? 0 : owed.first.$2;
+    var debit = owing.isEmpty ? 0 : owing.first.$2;
+
+    while (i < owed.length && j < owing.length) {
+      final amount = credit < debit ? credit : debit;
+      if (amount > 0) {
+        // In the ledger where they owe you, they have effectively paid you.
+        written.add(_writeOffset(owed[i].$1, standing, theyPayYou: true, amount: amount));
+        // In the ledger where you owe them, you have effectively paid them.
+        written.add(_writeOffset(owing[j].$1, standing, theyPayYou: false, amount: amount));
+      }
+      credit -= amount;
+      debit -= amount;
+      if (credit == 0) {
+        i++;
+        if (i < owed.length) credit = owed[i].$2;
+      }
+      if (debit == 0) {
+        j++;
+        if (j < owing.length) debit = owing[j].$2;
+      }
+    }
+
+    if (written.isNotEmpty) {
+      final total = written.fold(0, (s, w) => s + w.amount) ~/ 2;
+      _tell(
+        Notice(
+          to: [?standing.member.userId],
+          groupId: null,
+          kind: NoticeKind.nettedOff,
+          title: '${_theirNameFor(_anySeatOf(standing) ?? standing.member)} netted off '
+              '${inr(total)} with you',
+          body: 'Debts pointing both ways cancelled. Nothing moved.',
+          amount: total,
+        ),
+      );
+    }
+    return written;
+  }
+
+  /// Your own seat, for a sentence somebody else reads.
+  Member? _anySeatOf(Standing standing) =>
+      standing.groups.isEmpty ? null : standing.groups.first.you;
+
+  Settlement _writeOffset(
+    Group group,
+    Standing standing, {
+    required bool theyPayYou,
+    required int amount,
+  }) {
+    final me = group.you!.id;
+    final them = standing.seats[group.id]!;
+    final settlement = Settlement(
+      fromId: theyPayYou ? them : me,
+      toId: theyPayYou ? me : them,
+      amount: amount,
+      status: SettlementStatus.confirmed,
+      offset: true,
+      date: now(),
+      confirmedAt: now(),
+    );
+    group.settlements.add(settlement);
+    _commitGroup(group);
+    return settlement;
+  }
+
+  /// Records a real payment with one person, spread across the ledgers it
+  /// clears.
+  ///
+  /// Nets off first, so the payment only ever has to cover what is genuinely
+  /// left. Then it fills the largest ledger, then the next — which is what
+  /// makes a part payment behave: 500 against 1,800 clears nothing outright
+  /// and leaves one ledger 1,300 short rather than three ledgers all a bit
+  /// short.
+  List<Settlement> settleAcross(
+    Standing standing, {
+    required int amount,
+    String? utr,
+  }) {
+    if (amount <= 0) return const [];
+    netOff(standing);
+
+    // Re-read: netting off has just moved every ledger.
+    final ledgers = ledgersWith(standing);
+    final theyOwe = standing.amount > 0;
+    var left = amount;
+    final written = <Settlement>[];
+
+    for (final (group, balance) in ledgers) {
+      if (left <= 0) break;
+      // Only ledgers pointing the way the money is going.
+      if (theyOwe && balance <= 0) continue;
+      if (!theyOwe && balance >= 0) continue;
+      final here = balance.abs() < left ? balance.abs() : left;
+      final me = group.you!.id;
+      final them = standing.seats[group.id]!;
+      written.add(
+        settleUp(
+          group,
+          fromId: theyOwe ? them : me,
+          toId: theyOwe ? me : them,
+          amount: here,
+          utr: utr,
+        ),
+      );
+      left -= here;
+    }
+    return written;
+  }
+
   void confirmSettlement(Group group, Settlement settlement) {
     settlement
       ..status = SettlementStatus.confirmed
@@ -873,6 +1142,19 @@ class MullStore extends ChangeNotifier {
         amount: settlement.amount,
       ),
     );
+  }
+
+  /// "It turned up after all." Turns a dispute back into an open claim.
+  ///
+  /// Disputing was a one-way door: the claim stopped being pending, so it
+  /// vanished from every list that could have acted on it, and the only way
+  /// back was deleting the record entirely. A payment held up for two days and
+  /// then found is an ordinary thing and should not cost anybody their
+  /// evidence.
+  void reopenSettlement(Group group, Settlement settlement) {
+    if (settlement.status != SettlementStatus.disputed) return;
+    settlement.status = SettlementStatus.pending;
+    _commitGroup(group);
   }
 
   /// "I never got that." Keeps the record rather than deleting it, so the
@@ -901,8 +1183,53 @@ class MullStore extends ChangeNotifier {
     );
   }
 
-  void removeSettlement(Group group, Settlement settlement) {
+  /// Whether *you* may take a payment off the record.
+  ///
+  /// Only the two people it is between. A settlement is the evidence that a
+  /// debt was cleared, and a third party in a group of eight being able to
+  /// delete it — silently reopening money between two other people — was a
+  /// long-press away.
+  bool canRemoveSettlement(Group group, Settlement settlement) {
+    final me = group.you?.id;
+    return me != null && (settlement.fromId == me || settlement.toId == me);
+  }
+
+  /// Why the app will not remove it, in the words it should say.
+  String? whySettlementStays(Group group, Settlement settlement) =>
+      canRemoveSettlement(group, settlement)
+          ? null
+          : 'This payment is between two other people. Only they can take it '
+              'off the record.';
+
+  bool removeSettlement(Group group, Settlement settlement) {
+    if (!canRemoveSettlement(group, settlement)) return false;
     group.settlements.removeWhere((s) => s.id == settlement.id);
+    _tombstone(group, settlement.id, TombstoneKind.settlement);
+    _commitGroup(group);
+    // Removing a confirmed payment puts a debt back. The other end of it finds
+    // out now rather than from a balance that moved overnight.
+    final you = group.you;
+    if (you == null) return true;
+    final other = settlement.fromId == you.id ? settlement.toId : settlement.fromId;
+    _tell(
+      Notice(
+        to: _reachable(group, [other]),
+        groupId: group.id,
+        kind: NoticeKind.settlementRemoved,
+        title: '${_theirNameFor(you)} removed a ${inr(settlement.amount)} payment',
+        body: settlement.clearsDebt
+            ? 'That debt is open again in ${group.title}'
+            : group.title,
+        amount: settlement.amount,
+      ),
+    );
+    return true;
+  }
+
+  void restoreSettlement(Group group, Settlement settlement) {
+    if (group.settlements.any((s) => s.id == settlement.id)) return;
+    group.settlements.add(settlement);
+    _untombstone(group, settlement.id, TombstoneKind.settlement);
     _commitGroup(group);
   }
 
@@ -919,7 +1246,7 @@ class MullStore extends ChangeNotifier {
     final amount = receipt.amount;
     if (vpa == null && amount == null) return null;
 
-    (Group, Transfer)? byAmountOnly;
+    final byAmountOnly = <(Group, Transfer)>[];
     for (final group in groups) {
       final me = group.you?.id;
       if (me == null) continue;
@@ -931,10 +1258,14 @@ class MullStore extends ChangeNotifier {
         final vpaMatches = vpa != null && payee.upiId?.toLowerCase() == vpa;
         final amountMatches = amount != null && transfer.amount == amount;
         if (vpaMatches && (amountMatches || amount == null)) return (group, transfer);
-        if (amountMatches) byAmountOnly ??= (group, transfer);
+        if (amountMatches) byAmountOnly.add((group, transfer));
       }
     }
-    return byAmountOnly;
+    // One debt of that amount and nothing else it could be: take it. Two, and
+    // the honest answer is none — it used to keep whichever it happened to see
+    // first, which is iteration order deciding who got paid. A receipt filed
+    // against the wrong debt is worse than one filed by hand.
+    return byAmountOnly.length == 1 ? byAmountOnly.first : null;
   }
 
   /// Every claim across every group that is waiting on you.
@@ -945,26 +1276,46 @@ class MullStore extends ChangeNotifier {
 
   // --------------------------------------------------------------- reminders
 
-  /// Everyone who owes you, across everything, biggest first.
+  /// How the same person is recognised across ledgers.
   ///
-  /// Netted per person rather than per group: chasing the same friend three
-  /// times because you went to three dinners together is how a reminder
-  /// feature makes people close the app.
-  List<Owing> get owedToYou {
-    final byPerson = <String, Owing>{};
+  /// An account id when there is one, then an email, then the name. The last
+  /// is a guess and knowingly so: two seats both typed "Kabir" are treated as
+  /// one person, which is right far more often than it is wrong, and the only
+  /// alternative is chasing the same friend twice for the same money.
+  String _personKey(Member m) =>
+      m.userId ?? (m.email?.trim().toLowerCase().isNotEmpty ?? false
+          ? m.email!.trim().toLowerCase()
+          : m.name.trim().toLowerCase());
+
+  /// Where you stand with every person you share a ledger with, netted.
+  ///
+  /// This is the number the app should have been showing all along. Owing
+  /// Ananya 2,000 on the Goa trip while she owes you 3,000 on the flat is one
+  /// fact — she owes you 1,000 — and Mull used to report it as two, then chase
+  /// her for the larger half.
+  ///
+  /// Netted on [Group.pairBalance] rather than on the simplified transfers,
+  /// because "what do I owe Ananya" has to mean Ananya. Simplification is an
+  /// answer to a different question and belongs to the group screen that asks
+  /// it.
+  List<Standing> get standings {
+    final byPerson = <String, Standing>{};
     for (final group in groups) {
       final me = group.you?.id;
       if (me == null) continue;
-      for (final t in simplify(group.balances)) {
-        if (t.to != me) continue;
-        final debtor = group.memberById(t.from);
-        if (debtor == null) continue;
-        final key = debtor.userId ?? debtor.email ?? debtor.name.trim().toLowerCase();
+      for (final other in group.members) {
+        if (other.isYou) continue;
+        final amount = group.pairBalance(me, other.id);
+        final key = _personKey(other);
         final held = byPerson[key];
-        byPerson[key] = Owing(
-          member: debtor,
-          amount: (held?.amount ?? 0) + t.amount,
-          groups: [...?held?.groups, group],
+        // Somebody square in this ledger is still somebody you split with, so
+        // they keep their seat in the list — but a ledger that contributes
+        // nothing is not one worth naming under their name.
+        byPerson[key] = Standing(
+          member: held?.member ?? other,
+          amount: (held?.amount ?? 0) + amount,
+          groups: [...?held?.groups, if (amount != 0) group],
+          seats: {...?held?.seats, group.id: other.id},
           // The same person holds a separate seat in every group, and each
           // seat carries its own record of being chased. Netting the debt but
           // not the reminders would hand you a fresh allowance per group,
@@ -975,24 +1326,53 @@ class MullStore extends ChangeNotifier {
           // the fullest list is the true one — and merging them would depend
           // on two DateTimes written in the same breath comparing equal,
           // which is a coincidence to rely on rather than a rule.
-          nudges: _longer(held?.nudges, debtor.nudges),
+          nudges: _longer(held?.nudges, other.nudges),
         );
       }
     }
-    return byPerson.values.toList()..sort((a, b) => b.amount.compareTo(a.amount));
+    return byPerson.values.toList()
+      ..sort((a, b) {
+        // You owe, then you are owed, then square — the same order the ledger
+        // list uses, so the two halves of the home screen read the same way.
+        int rank(Standing s) => switch (s.amount) { < 0 => 0, > 0 => 1, _ => 2 };
+        final byDirection = rank(a).compareTo(rank(b));
+        if (byDirection != 0) return byDirection;
+        final byAmount = b.magnitude.compareTo(a.magnitude);
+        if (byAmount != 0) return byAmount;
+        return a.member.name.toLowerCase().compareTo(b.member.name.toLowerCase());
+      });
+  }
+
+  /// Everyone who owes you on balance, biggest first.
+  List<Standing> get owedToYou => [
+    for (final s in standings)
+      if (s.theyOweYou) s,
+  ];
+
+  /// Everyone you owe on balance, biggest first. The half of the ledger Mull
+  /// never used to show.
+  List<Standing> get youOweThem => [
+    for (final s in standings)
+      if (s.youOwe) s,
+  ];
+
+  /// Where you stand with one person, or null if you share no ledger.
+  Standing? standingWith(Member member) {
+    final key = _personKey(member);
+    return standings.where((s) => _personKey(s.member) == key).firstOrNull;
   }
 
   static List<DateTime> _longer(List<DateTime>? a, List<DateTime> b) =>
       (a?.length ?? 0) >= b.length ? [...?a] : [...b];
 
   /// How many more times you may chase this person today.
-  int nudgesLeft(Owing owing) {
+  int nudgesLeft(Standing standing) {
     final cutoff = now().subtract(kNudgeWindow);
-    final spent = owing.nudges.where((n) => n.isAfter(cutoff)).length;
+    final spent = standing.nudges.where((n) => n.isAfter(cutoff)).length;
     return (kNudgesPerDay - spent).clamp(0, kNudgesPerDay);
   }
 
-  bool canNudge(Owing owing) => nudgesLeft(owing) > 0;
+  bool canNudge(Standing standing) => standing.theyOweYou && nudgesLeft(standing) > 0;
 
   /// The message a nudge carries. Short, and it ends with the way to pay.
   ///
@@ -1000,24 +1380,30 @@ class MullStore extends ChangeNotifier {
   /// It arrives inside Mull now, but it is the same words either way, and
   /// someone reading "Ananya · ₹500 · Goa" on a lock screen should not have to
   /// open anything to know what is being asked.
-  String nudgeMessage(Owing owing) {
-    final where = owing.groups.length == 1
-        ? ' for ${owing.groups.first.title}'
-        : ' across ${owing.groups.length} groups';
+  ///
+  /// The amount is the netted one, so it can never ask for money you are
+  /// holding half of yourself.
+  String nudgeMessage(Standing standing) {
+    final where = standing.groups.length == 1
+        ? ' for ${standing.groups.first.title}'
+        : ' across ${standing.groups.length} ledgers';
     final upi = profile.upiId;
     return [
-      'Hey ${shortName(owing.member)}, ${inr(owing.amount)}$where when you get a chance.',
+      'Hey ${shortName(standing.member)}, ${inr(standing.amount)}$where when you get a chance.',
       if (upi != null) 'My UPI is $upi.',
       'No rush.',
     ].join(' ');
   }
 
-  void markNudged(Owing owing) {
+  void markNudged(Standing standing) {
     final at = now();
     final cutoff = at.subtract(kNudgeWindow);
-    for (final group in owing.groups) {
-      final seat = group.memberById(owing.member.id) ??
-          group.members.where((m) => !m.isYou && m.name == owing.member.name).firstOrNull;
+    for (final group in groups) {
+      // Their seat in this group, by id rather than by name: the same person
+      // is a different seat in every ledger, and matching on what they are
+      // called breaks the moment somebody is renamed.
+      final seatId = standing.seats[group.id];
+      final seat = seatId == null ? null : group.memberById(seatId);
       if (seat == null) continue;
       seat.nudges
         // Anything older than the window can never affect the count again, and
@@ -1026,7 +1412,7 @@ class MullStore extends ChangeNotifier {
         ..removeWhere((n) => !n.isAfter(cutoff))
         ..add(at);
     }
-    owing.nudges.add(at);
+    standing.nudges.add(at);
     _commit();
   }
 
@@ -1036,10 +1422,10 @@ class MullStore extends ChangeNotifier {
   /// sent from another phone never touched this one's copy. When the server
   /// says the allowance is gone, it is gone — arguing with it only means the
   /// button stays lit over a call that will keep being refused.
-  void spendNudges(Owing owing) {
+  void spendNudges(Standing standing) {
     var guard = 0;
-    while (nudgesLeft(owing) > 0 && guard++ <= kNudgesPerDay) {
-      markNudged(owing);
+    while (nudgesLeft(standing) > 0 && guard++ <= kNudgesPerDay) {
+      markNudged(standing);
     }
   }
 
@@ -1100,8 +1486,14 @@ class MullStore extends ChangeNotifier {
 
   /// Split out, because "₹3,850 all in" hides the fact that you are owed
   /// ₹12,000 by one person and owe ₹15,850 to another.
-  int get totalYouOwe => groups.fold(0, (s, g) => s + (g.yourBalance < 0 ? -g.yourBalance : 0));
-  int get totalOwedToYou => groups.fold(0, (s, g) => s + (g.yourBalance > 0 ? g.yourBalance : 0));
+  ///
+  /// Counted per person rather than per group, so the two halves agree with
+  /// the names underneath them. Summing groups would report owing Ananya on
+  /// the trip *and* being owed by her on the flat, when netted she is one
+  /// number in one direction — and the person reading it cannot reconcile a
+  /// total that counts somebody twice.
+  int get totalYouOwe => standings.fold(0, (s, p) => s + (p.youOwe ? p.magnitude : 0));
+  int get totalOwedToYou => standings.fold(0, (s, p) => s + (p.theyOweYou ? p.amount : 0));
 
   bool get isAllSquare => groups.every((g) => g.yourBalance == 0);
 
@@ -1164,6 +1556,16 @@ class MullStore extends ChangeNotifier {
     final today = dayOf(now());
     DateTime ago(int days) => today.subtract(Duration(days: days));
 
+    // One account id per person, reused wherever they turn up.
+    //
+    // These used to be a fresh `newId()` in every group, which made the sample
+    // three different Sahils as far as the app was concerned: he showed up
+    // three times on the home screen, owing in one row and owed in another,
+    // which is the exact thing person-level netting exists to stop. Demo data
+    // that cannot exercise the feature is demo data that hides it.
+    final accounts = <String, String>{};
+    String account(String name) => accounts.putIfAbsent(name, newId);
+
     // ---- Goa trip: four people, one of them not on Mull, and a claim.
     //
     // The numbers are worked so the group lands exactly where the mockups put
@@ -1171,8 +1573,8 @@ class MullStore extends ChangeNotifier {
     // payments the settle-up screen offers.
     final goa = Group(name: 'Goa trip', icon: 'beach');
     final you = Member(name: profile.name, isYou: true, upiId: profile.upiId, role: MemberRole.admin);
-    final sahil = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
-    final ananya = Member(name: 'Ananya Rao', upiId: 'ananya@ybl', userId: newId());
+    final sahil = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: account('Sahil Mehra'));
+    final ananya = Member(name: 'Ananya Rao', upiId: 'ananya@ybl', userId: account('Ananya Rao'));
     // No userId and no VPA: a placeholder seat, settled in person.
     final kabir = Member(name: 'Kabir');
     goa.members.addAll([you, sahil, ananya, kabir]);
@@ -1264,9 +1666,9 @@ class MullStore extends ChangeNotifier {
     // ---- Flat: the standing costs, one of them nearly due.
     final flat = Group(name: 'Flat', icon: 'home');
     final youFlat = Member(name: profile.name, isYou: true, upiId: profile.upiId, role: MemberRole.admin);
-    final bhavya = Member(name: 'Bhavya Nair', upiId: 'bhavya@okicici', userId: newId());
-    final sahilFlat = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
-    final dev = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
+    final bhavya = Member(name: 'Bhavya Nair', upiId: 'bhavya@okicici', userId: account('Bhavya Nair'));
+    final sahilFlat = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: account('Sahil Mehra'));
+    final dev = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: account('Dev Rao'));
     flat.members.addAll([youFlat, bhavya, sahilFlat, dev]);
     final flatIds = flat.members.map((m) => m.id).toList();
 
@@ -1327,8 +1729,8 @@ class MullStore extends ChangeNotifier {
     // ---- Sunday football: square, and still worth keeping.
     final football = Group(name: 'Sunday football', icon: 'football');
     final youBall = Member(name: profile.name, isYou: true, upiId: profile.upiId, role: MemberRole.admin);
-    final sahilBall = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: newId());
-    final devBall = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: newId());
+    final sahilBall = Member(name: 'Sahil Mehra', upiId: 'sahil@okaxis', userId: account('Sahil Mehra'));
+    final devBall = Member(name: 'Dev Rao', upiId: 'dev@ybl', userId: account('Dev Rao'));
     football.members.addAll([youBall, sahilBall, devBall]);
     final ballIds = football.members.map((m) => m.id).toList();
     football.expenses.add(
@@ -1354,7 +1756,7 @@ class MullStore extends ChangeNotifier {
     }
 
     // ---- And one person, with no group around it.
-    final ritu = directWith(name: 'Ritu Nair', userId: newId(), upiId: 'ritu@okicici');
+    final ritu = directWith(name: 'Ritu Nair', userId: account('Ritu Nair'), upiId: 'ritu@okicici');
     final youRitu = ritu.you!;
     final herSeat = ritu.counterpart!;
     final cab = Expense(
@@ -1389,10 +1791,13 @@ class MullStore extends ChangeNotifier {
 /// a thing it has no template for.
 enum NoticeKind {
   expenseAdded,
+  expenseChanged,
   expenseRemoved,
   settlementClaimed,
   settlementConfirmed,
   settlementDisputed,
+  settlementRemoved,
+  nettedOff,
   reminder,
   addedToGroup,
 }
@@ -1401,20 +1806,26 @@ extension NoticeKindWire on NoticeKind {
   /// The enum label Postgres uses. Snake case there, camel here.
   String get wire => switch (this) {
     NoticeKind.expenseAdded => 'expense_added',
+    NoticeKind.expenseChanged => 'expense_changed',
     NoticeKind.expenseRemoved => 'expense_removed',
     NoticeKind.settlementClaimed => 'settlement_claimed',
     NoticeKind.settlementConfirmed => 'settlement_confirmed',
     NoticeKind.settlementDisputed => 'settlement_disputed',
+    NoticeKind.settlementRemoved => 'settlement_removed',
+    NoticeKind.nettedOff => 'netted_off',
     NoticeKind.reminder => 'reminder',
     NoticeKind.addedToGroup => 'added_to_group',
   };
 
   static NoticeKind read(String? value) => switch (value) {
     'expense_added' => NoticeKind.expenseAdded,
+    'expense_changed' => NoticeKind.expenseChanged,
     'expense_removed' => NoticeKind.expenseRemoved,
     'settlement_claimed' => NoticeKind.settlementClaimed,
     'settlement_confirmed' => NoticeKind.settlementConfirmed,
     'settlement_disputed' => NoticeKind.settlementDisputed,
+    'settlement_removed' => NoticeKind.settlementRemoved,
+    'netted_off' => NoticeKind.nettedOff,
     'reminder' => NoticeKind.reminder,
     _ => NoticeKind.addedToGroup,
   };
@@ -1442,20 +1853,46 @@ class Notice {
 }
 
 /// One person and everything they owe you, netted across every ledger.
-class Owing {
-  Owing({
+/// Where you stand with one person, across every ledger you share.
+///
+/// Signed, and that is the whole point. Mull used to have an `Owing`, which
+/// could only ever describe money coming towards you — so the half of the app
+/// that mattered when you were the one who owed simply had no object to be
+/// built out of, and was never built.
+class Standing {
+  Standing({
     required this.member,
     required this.amount,
     required this.groups,
+    required this.seats,
     List<DateTime>? nudges,
   }) : nudges = nudges ?? [];
 
+  /// One of their seats, for a name and a UPI ID. Which one is arbitrary —
+  /// they are the same person, which is the premise of this class.
   final Member member;
+
+  /// Positive means they owe you; negative means you owe them.
   final int amount;
+
+  /// The ledgers that actually contribute something. A group you are square
+  /// in is not part of the story.
   final List<Group> groups;
+
+  /// Their member id in each group, so a nudge can stamp every seat without
+  /// matching on a name that might have been changed.
+  final Map<String, String> seats;
 
   /// Every time you have chased them, across all of those ledgers.
   final List<DateTime> nudges;
+
+  bool get theyOweYou => amount > 0;
+  bool get youOwe => amount < 0;
+  bool get isSquare => amount == 0;
+
+  /// The amount with no sign on it, for a screen that says the direction in
+  /// words instead.
+  int get magnitude => amount.abs();
 
   DateTime? get lastNudgedAt => nudges.isEmpty ? null : nudges.last;
 }

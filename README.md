@@ -7,13 +7,20 @@ which Mull never touches. Groups for a trip or a flat, one-to-one ledgers for
 everything that is not a group, and schedules for the things that come round
 every month on their own.
 
-The two things it does that other split apps do not:
+The things it does that other split apps do not:
 
+- **Money between two people is one number.** Owing Ananya ₹2,000 on the trip
+  while she owes you ₹3,000 on the flat is one fact — she owes you ₹1,000 — and
+  Mull says so, on the home screen and in the reminder it sends. Where debts
+  point both ways it offers to **net them off**: both ledgers are written up so
+  each is honestly square, and nothing moves. Every screen says which way it
+  points, in words, in both directions.
 - **A payment is claimed and then confirmed.** "Mark as settled" being a single
   unverified tap is what makes a shared ledger rot — one side taps it, the other
   never sees the money, and the balance is quietly wrong forever. Here the payer
   claims and the payee confirms, and a UPI receipt shared into Mull carries the
-  amount and the reference as evidence.
+  amount and the reference as evidence. A claim nobody answered, and one that
+  was disputed, both stay findable and fixable.
 - **A schedule asks.** Rent goes up and people move out, so a due schedule
   surfaces as a card with the amount in an editable field. What you confirm is
   what gets recorded, and it becomes the new normal.
@@ -54,8 +61,9 @@ flutter drive --driver=test_driver/integration_test.dart --target=integration_te
 - `lib/data` — models and `MullStore` (local-first, one JSON file, debounced atomic writes),
   plus `remote/` for Supabase auth, friends and group sync
 - `lib/ui` — design tokens, surfaces, sheets, page scaffold, icons
-- `lib/screens` — onboarding, home, and under `groups/` the create flow, the group hub and its three
-  destinations (settle up, ledger, recurring), plus the sheets
+- `lib/screens` — onboarding, home, the per-person sheet (`people_sheet.dart`, where a balance is
+  netted across ledgers and settled), and under `groups/` the create flow, the group hub and its
+  three destinations (settle up, ledger, recurring), plus the sheets
 
 ## The design
 
@@ -63,7 +71,9 @@ Built from `Mull UI spec.pdf` and the eight exported screens (4A–4H). Four rul
 `lib/ui/tokens.dart` is where they live:
 
 - **No colour, ever.** Owing and being owed are told apart by the words and the weight, never by
-  hue. There is no accent and no red/green.
+  hue. There is no accent and no red/green. Nothing recedes by going translucent either — an
+  `Opacity` over a settled row took its caption to 2.6:1 against the screen, so a row that is done
+  steps back by sitting flatter and by saying so.
 - **No borders, no glass.** Hierarchy is only how high a surface floats: a gradient fill and a
   shadow. `Lift.focal` / `card` / `low` / `flat`, and **exactly one focal object per screen**.
 - **Two gutters.** Text and titles at 30, cards and buttons at 20, so cards break outboard of the

@@ -710,6 +710,375 @@ void main() {
     });
   });
 
+  // --------------------------------------------------------------- netting
+  //
+  // The thing Mull got wrong for longest. Money between two people is one
+  // fact, and the app used to report it once per ledger and then chase them
+  // for the larger half.
+
+  group('where you stand with a person', () {
+    late MullStore store;
+    late Group goa;
+    late Group flat;
+
+    setUp(() {
+      store = MullStore.memory();
+      store.completeOnboarding(name: 'Bharat');
+
+      // Ananya paid for the villa: you owe her 2,000 here.
+      goa = store.addGroup('Goa', ['Ananya']);
+      final meA = goa.you!.id;
+      final herA = goa.members.firstWhere((m) => !m.isYou).id;
+      store.addExpense(
+        goa,
+        description: 'Villa',
+        amount: 4000,
+        payerId: herA,
+        shares: splitEqually(4000, [meA, herA]),
+      );
+
+      // You paid the rent: she owes you 3,000 here.
+      flat = store.addGroup('Flat', ['Ananya']);
+      final meB = flat.you!.id;
+      final herB = flat.members.firstWhere((m) => !m.isYou).id;
+      store.addExpense(
+        flat,
+        description: 'Rent',
+        amount: 6000,
+        payerId: meB,
+        shares: splitEqually(6000, [meB, herB]),
+      );
+    });
+
+    Standing ananya() => store.standings.single;
+
+    test('two ledgers pointing opposite ways are one netted number', () {
+      expect(goa.yourBalance, -2000);
+      expect(flat.yourBalance, 3000);
+      expect(
+        ananya().amount,
+        1000,
+        reason: 'she owes 3,000 and is owed 2,000, which is one fact',
+      );
+      expect(ananya().groups, hasLength(2));
+    });
+
+    test('a nudge asks for the netted amount, never the gross one', () {
+      // The bug this replaced sent "Hey Ananya, ₹3,000" while owing her 2,000.
+      expect(store.nudgeMessage(ananya()), contains('₹1,000'));
+      expect(store.nudgeMessage(ananya()), isNot(contains('₹3,000')));
+    });
+
+    test('the two halves of the headline agree with the names under them', () {
+      expect(store.totalOwedToYou, 1000);
+      expect(store.totalYouOwe, 0, reason: 'counting groups would say 2,000');
+      expect(store.netAcrossAll, store.totalOwedToYou - store.totalYouOwe);
+    });
+
+    test('someone you owe has a row of their own', () {
+      final dev = store.addGroup('Dinner', ['Dev']);
+      final me = dev.you!.id;
+      final him = dev.members.firstWhere((m) => !m.isYou).id;
+      store.addExpense(
+        dev,
+        description: 'Dinner',
+        amount: 800,
+        payerId: him,
+        shares: splitEqually(800, [me, him]),
+      );
+      expect(store.youOweThem.single.member.name, 'Dev');
+      expect(store.youOweThem.single.magnitude, 400);
+      expect(store.totalYouOwe, 400);
+    });
+
+    test('a pair balance is what you owe them, not what the group owes them', () {
+      final trip = store.addGroup('Trip', ['Sahil', 'Kabir']);
+      final me = trip.you!.id;
+      final sahil = trip.members[1].id;
+      final kabir = trip.members[2].id;
+      // Sahil pays for everyone. You owe Sahil; Kabir owes Sahil.
+      store.addExpense(
+        trip,
+        description: 'Hotel',
+        amount: 3000,
+        payerId: sahil,
+        shares: splitEqually(3000, [me, sahil, kabir]),
+      );
+      expect(trip.balances[sahil], 2000, reason: 'the group owes Sahil 2,000');
+      expect(
+        trip.pairBalanceWithYou(sahil),
+        -1000,
+        reason: 'but you only owe him your own share',
+      );
+      expect(trip.pairBalanceWithYou(kabir), 0);
+    });
+
+    test('pair balances always add back up to the group balance', () {
+      final trip = store.addGroup('Trip', ['Sahil', 'Kabir']);
+      final me = trip.you!.id;
+      store.addExpense(
+        trip,
+        description: 'Boat',
+        amount: 1000,
+        payerId: me,
+        shares: splitByWeight(1000, {
+          me: 1,
+          trip.members[1].id: 2,
+          trip.members[2].id: 3,
+        }),
+      );
+      for (final g in store.groups) {
+        final sum = g.members
+            .where((m) => !m.isYou)
+            .fold(0, (t, m) => t + g.pairBalanceWithYou(m.id));
+        expect(sum, g.yourBalance);
+      }
+    });
+
+    test('netting off cancels both ledgers and moves no money', () {
+      expect(store.canNetOff(ananya()), isTrue);
+      expect(store.netOffAmount(ananya()), 2000);
+
+      final before = store.netAcrossAll;
+      store.netOff(ananya());
+
+      expect(goa.yourBalance, 0, reason: 'the smaller ledger closes outright');
+      expect(flat.yourBalance, 1000, reason: 'and the rest is what is really left');
+      expect(store.netAcrossAll, before, reason: 'no money moved');
+      expect(store.standings.single.amount, 1000);
+      expect(
+        goa.settlements.every((s) => s.offset),
+        isTrue,
+        reason: 'an offset must never be recorded as a payment somebody made',
+      );
+    });
+
+    test('netting off is idempotent', () {
+      store.netOff(ananya());
+      final after = store.netAcrossAll;
+      store.netOff(store.standings.single);
+      expect(store.netAcrossAll, after);
+      expect(store.canNetOff(store.standings.single), isFalse);
+    });
+
+    test('a part payment leaves the rest open', () {
+      store.settleAcross(ananya(), amount: 400);
+      expect(store.standings.single.amount, 600);
+    });
+
+    test('paying in full squares the person and every ledger', () {
+      store.settleAcross(ananya(), amount: 1000);
+      expect(store.standings.single.amount, 0);
+      expect(store.netAcrossAll, 0);
+      expect(goa.yourBalance, 0);
+      expect(flat.yourBalance, 0);
+    });
+
+    test('you owe first, then you are owed, then square', () {
+      final dev = store.addGroup('Dinner', ['Dev']);
+      final me = dev.you!.id;
+      final him = dev.members.firstWhere((m) => !m.isYou).id;
+      store.addExpense(
+        dev,
+        description: 'Dinner',
+        amount: 800,
+        payerId: him,
+        shares: splitEqually(800, [me, him]),
+      );
+      // Dev is 400 owed by you, Ananya is 1,000 owed to you. Sorting on size
+      // alone put Ananya first and swapped them whenever either moved.
+      expect(store.standings.first.member.name, 'Dev');
+      expect(store.standings.first.youOwe, isTrue);
+    });
+  });
+
+  group('taking things off the record', () {
+    late MullStore store;
+    late Group goa;
+
+    setUp(() {
+      store = MullStore.memory();
+      store.completeOnboarding(name: 'Bharat');
+      goa = store.addGroup('Goa', ['Ananya']);
+      final me = goa.you!.id;
+      final her = goa.members.firstWhere((m) => !m.isYou).id;
+      store.addExpense(
+        goa,
+        description: 'Villa',
+        amount: 4000,
+        payerId: me,
+        shares: splitEqually(4000, [me, her]),
+      );
+    });
+
+    test('a deletion is remembered until the server has been told', () {
+      // An upsert can only say "this row exists", so without a tombstone the
+      // expense came back on the next pull with everyone's balance behind it.
+      final expense = goa.expenses.single;
+      store.removeExpense(goa, expense);
+      expect(goa.tombstones, hasLength(1));
+      expect(goa.tombstones.single.kind, TombstoneKind.expense);
+      expect(goa.tombstones.single.id, expense.id);
+    });
+
+    test('undo takes the tombstone back off before it can travel', () {
+      final expense = goa.expenses.single;
+      store.removeExpense(goa, expense);
+      store.restoreExpense(goa, expense);
+      expect(goa.expenses, hasLength(1));
+      expect(goa.tombstones, isEmpty);
+    });
+
+    test('the sync clearing a tombstone leaves the others alone', () {
+      final expense = goa.expenses.single;
+      store.removeExpense(goa, expense);
+      final schedule = store.addRecurring(
+        goa,
+        description: 'Wifi',
+        amount: 1000,
+        payerId: goa.you!.id,
+        shares: {goa.you!.id: 1000},
+        startsOn: DateTime(2026, 10),
+      );
+      store.removeRecurring(goa, schedule);
+      expect(goa.tombstones, hasLength(2));
+      store.clearTombstones(goa, [goa.tombstones.first]);
+      expect(goa.tombstones, hasLength(1));
+    });
+
+    test('leaving a group deletes your seat, not just the local copy', () {
+      final empty = store.addGroup('Empty', ['Raj']);
+      final you = empty.you!;
+      // Someone has to be left running it, which is a separate rule and a
+      // good one.
+      store.setAdmin(empty, empty.members.firstWhere((m) => !m.isYou), true);
+      expect(store.leaveGroup(empty), isTrue);
+      expect(
+        empty.tombstones.any((t) => t.kind == TombstoneKind.member && t.id == you.id),
+        isTrue,
+        reason: 'without this the next pull hands the group straight back',
+      );
+    });
+
+    test('only the two people a payment is between can remove it', () {
+      final trip = store.addGroup('Trip', ['Dev', 'Raj']);
+      final between = Settlement(
+        fromId: trip.members[1].id,
+        toId: trip.members[2].id,
+        amount: 500,
+        status: SettlementStatus.confirmed,
+      );
+      trip.settlements.add(between);
+
+      expect(store.canRemoveSettlement(trip, between), isFalse);
+      expect(store.removeSettlement(trip, between), isFalse);
+      expect(trip.settlements, contains(between));
+      expect(store.whySettlementStays(trip, between), isNotNull);
+    });
+
+    test('a payment you are part of can be removed, and put back', () {
+      final her = goa.members.firstWhere((m) => !m.isYou).id;
+      final paid = store.settleUp(goa, fromId: her, toId: goa.you!.id, amount: 2000);
+      expect(goa.yourBalance, 0);
+
+      expect(store.removeSettlement(goa, paid), isTrue);
+      expect(goa.yourBalance, 2000, reason: 'the debt is open again');
+      store.restoreSettlement(goa, paid);
+      expect(goa.yourBalance, 0);
+      expect(goa.tombstones, isEmpty);
+    });
+
+    test('a dispute is not a dead end', () {
+      final her = goa.members.firstWhere((m) => !m.isYou);
+      final claim = Settlement(
+        fromId: her.id,
+        toId: goa.you!.id,
+        amount: 2000,
+        status: SettlementStatus.pending,
+      );
+      goa.settlements.add(claim);
+
+      store.disputeSettlement(goa, claim);
+      expect(claim.clearsDebt, isFalse);
+      expect(
+        store.openClaims.map((c) => c.$2),
+        contains(claim),
+        reason: 'a disagreement about money is the last thing to go quiet',
+      );
+
+      store.reopenSettlement(goa, claim);
+      expect(claim.status, SettlementStatus.pending);
+      store.confirmSettlement(goa, claim);
+      expect(claim.clearsDebt, isTrue);
+    });
+
+    test('your own unanswered claims are findable', () {
+      final her = goa.members.firstWhere((m) => !m.isYou);
+      her.userId = 'someone';
+      final flat = store.addGroup('Flat', <String>[]);
+      store.addFriendAsMember(flat, userId: 'someone', name: 'Ananya');
+      final me = flat.you!.id;
+      final herSeat = flat.members.firstWhere((m) => !m.isYou).id;
+      store.addExpense(
+        flat,
+        description: 'Rent',
+        amount: 2000,
+        payerId: herSeat,
+        shares: splitEqually(2000, [me, herSeat]),
+      );
+      store.settleUp(flat, fromId: me, toId: herSeat, amount: 1000);
+      expect(
+        store.claimsAwaitingOthers,
+        hasLength(1),
+        reason: 'the payer had no way to see a claim nobody confirmed',
+      );
+    });
+  });
+
+  group('splitting by percentage', () {
+    // splitByWeight normalises, which is right for shares ("Dev eats two
+    // portions") and wrong for percentages: 30 and 30 quietly became half
+    // each, and the line underneath said "Split by percentage" with a
+    // straight face. Nobody typing 30 means 50.
+    test('weights normalise, which is what shares are for', () {
+      final out = splitByWeight(1000, {'a': 30, 'b': 30});
+      expect(out.values.fold(0, (s, v) => s + v), 1000);
+      expect(out['a'], 500);
+    });
+
+    test('so percentages have to be checked before they get there', () {
+      int total(Map<String, num> w) =>
+          w.values.fold<double>(0, (s, v) => s + v.toDouble()).round();
+      expect(total({'a': 30, 'b': 30}), isNot(100));
+      expect(total({'a': 50, 'b': 50}), 100);
+      // Thirds, which nobody can type exactly and everybody types.
+      expect(total({'a': 33.33, 'b': 33.33, 'c': 33.34}), 100);
+    });
+  });
+
+  group('matching a receipt when two debts look alike', () {
+    test('two debts of the same amount are not guessed between', () {
+      final store = MullStore.memory();
+      store.completeOnboarding(name: 'Bharat');
+      for (final name in ['Goa', 'Flat']) {
+        final g = store.addGroup(name, ['Ananya']);
+        final me = g.you!.id;
+        final her = g.members.firstWhere((m) => !m.isYou).id;
+        store.addExpense(
+          g,
+          description: 'Thing',
+          amount: 1000,
+          payerId: her,
+          shares: splitEqually(1000, [me, her]),
+        );
+      }
+      // 500 owed in each, no VPA to tell them apart. Filing it against
+      // whichever came first is iteration order deciding who got paid.
+      final receipt = UpiReceipt(amount: 500);
+      expect(store.matchReceipt(receipt), isNull);
+    });
+  });
+
   group('reminders', () {
     MullStore owed() {
       final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19, 10);

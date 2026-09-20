@@ -21,11 +21,22 @@ class SettleUpScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.c;
     final store = context.store;
     final group = store.groupById(groupId);
     if (group == null) return const SizedBox.shrink();
 
-    final transfers = simplify(group.balances);
+    // Only transfers between people who are still here.
+    //
+    // A member removed elsewhere can keep a balance — it is real history — and
+    // simplify will happily name them in a payment. The card for it then drew
+    // nothing, so the page announced "three payments clear this group" above
+    // two, and the missing one could never be settled by anybody.
+    final transfers = [
+      for (final t in simplify(group.balances))
+        if (group.memberById(t.from) != null && group.memberById(t.to) != null) t,
+    ];
+    final orphaned = simplify(group.balances).length - transfers.length;
     final me = group.you?.id;
 
     // A claim already sitting against a transfer changes what the row is for:
@@ -53,6 +64,9 @@ class SettleUpScreen extends StatelessWidget {
       header: const DetailBar(),
       footnote: transfers.isEmpty
           ? null
+          : orphaned > 0
+          ? 'Someone who has left this group still has a balance in it. Their '
+                'share stays in the history and cannot be settled here.'
           : 'Money never moves through Mull.\nPay over UPI, then say it went through.',
       bottom: transfers.isEmpty
           ? null
@@ -77,6 +91,22 @@ class SettleUpScreen extends StatelessWidget {
                     '${group.members.length} people',
           padding: const EdgeInsets.fromLTRB(Gutter.text, 30, Gutter.text, 0),
         ),
+
+        // Simplification can name two people who never transacted, which is
+        // the right answer and a surprising one. Said out loud it reads as
+        // clever; unsaid it reads as a bug, and people go looking for the
+        // expense they had with somebody they have never split anything with.
+        if (transfers.isNotEmpty && group.simplifyReroutes)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Gutter.text, 22, Gutter.text, 0),
+            child: Text(
+              'Some of these pair people who did not spend anything together. '
+              'Passing the money straight along is what makes it '
+              '${transfers.length == 1 ? 'one payment' : '${transfers.length} payments'} '
+              'instead of one per expense. Tap any row to see where it came from.',
+              style: MullType.caption(c.ink3),
+            ),
+          ),
 
         if (transfers.isNotEmpty) ...[
           const SizedBox(height: 40),

@@ -73,6 +73,30 @@ class GroupsSync {
     return _extended!;
   }
 
+  /// Whether the 2026-09-20 settlement migration is in — soft-deleted
+  /// settlements and the offset flag.
+  ///
+  /// Its own probe rather than a sixth thing hanging off [_hasExtendedSchema],
+  /// because it went up later: a project sitting between the two migrations
+  /// would otherwise be told it has neither, and lose schedules it can
+  /// perfectly well store.
+  bool? _settlementsExtended;
+
+  Future<bool> _hasSettlementExtras() async {
+    if (_settlementsExtended != null) return _settlementsExtended!;
+    try {
+      await Backend.client.from('settlements').select('is_offset').limit(1);
+      _settlementsExtended = true;
+    } catch (_) {
+      _settlementsExtended = false;
+      debugPrint(
+        'mull: this project predates the settlement migration, run `supabase db push`. '
+        'Netting off and removing a payment stay on this phone until then.',
+      );
+    }
+    return _settlementsExtended!;
+  }
+
   /// Points the store's group mutations at this sync.
   void attachTo(MullStore store) {
     store
@@ -128,7 +152,12 @@ class GroupsSync {
   /// happens to touch it, which for a finished trip is never.
   Future<void> _retryUnsynced() async {
     if (!_live) return;
-    for (final group in [..._store.groups.where((g) => !g.hasReachedServer)]) {
+    // A group whose *deletions* have not landed needs another go just as much
+    // as one that never reached the server at all. Without this a delete made
+    // with no signal keeps its tombstone forever and the row lives on.
+    for (final group in [
+      ..._store.groups.where((g) => !g.hasReachedServer || g.tombstones.isNotEmpty),
+    ]) {
       await push(group);
     }
   }
@@ -151,6 +180,7 @@ class GroupsSync {
     _busy = true;
     try {
       final extended = await _hasExtendedSchema();
+      final settlementExtras = await _hasSettlementExtras();
       final rows = await Backend.client
           .from('groups')
           .select('''
@@ -165,7 +195,7 @@ class GroupsSync {
                                  last_added_on, created_at, deleted_at,
                                  recurring_shares ( member_id, amount ) )''' : ''},
             settlements ( id, from_member_id, to_member_id, amount, status,
-                          utr, claimed_at, confirmed_at )
+                          utr, claimed_at, confirmed_at${settlementExtras ? ', is_offset, deleted_at' : ''} )
           ''')
           .isFilter('deleted_at', null)
           .order('created_at');
@@ -265,8 +295,10 @@ class GroupsSync {
       );
     }
 
-    final settlements = [
-      for (final s in (row['settlements'] as List? ?? const []))
+    final settlements = <Settlement>[];
+    for (final s in (row['settlements'] as List? ?? const [])) {
+      if (s['deleted_at'] != null) continue;
+      settlements.add(
         Settlement(
           id: s['id'] as String,
           fromId: s['from_member_id'] as String,
@@ -274,10 +306,12 @@ class GroupsSync {
           amount: (s['amount'] as num).toInt(),
           status: SettlementStatus.values.byName(s['status'] as String? ?? 'pending'),
           utr: s['utr'] as String?,
+          offset: s['is_offset'] as bool? ?? false,
           date: DateTime.parse(s['claimed_at'] as String),
           confirmedAt: s['confirmed_at'] == null ? null : DateTime.parse(s['confirmed_at'] as String),
         ),
-    ];
+      );
+    }
 
     return Group(
       id: row['id'] as String,
@@ -304,6 +338,7 @@ class GroupsSync {
     if (me == null) return;
 
     final extended = await _hasExtendedSchema();
+    final settlementExtras = await _hasSettlementExtras();
 
     try {
       final db = Backend.client;
@@ -433,12 +468,14 @@ class GroupsSync {
               'amount': s.amount,
               'status': s.status.name,
               'utr': s.utr,
+              if (settlementExtras) 'is_offset': s.offset,
               'claimed_at': s.date.toIso8601String(),
               'claimed_by': me,
               'confirmed_at': s.confirmedAt?.toIso8601String(),
             },
         ]);
       }
+      await _applyTombstones(group, extended: extended, settlementExtras: settlementExtras);
       _store.markGroupSynced(group);
     } catch (e) {
       // Loud on purpose. A push that fails quietly leaves the app looking
@@ -456,6 +493,76 @@ class GroupsSync {
         'expired=${session?.isExpired} expiresAt=${session?.expiresAt}',
       );
     }
+  }
+
+  /// Passes on the deletions this phone made.
+  ///
+  /// An upsert can only ever say "this row exists", so a push on its own was
+  /// half a sentence: an expense deleted here stayed on the server and came
+  /// back on the next pull, taking everyone's balance with it. The group
+  /// carries its deletions until this has said them out loud.
+  ///
+  /// Soft deletes where the table has a `deleted_at`, because a balance that
+  /// changes should leave a trace someone can go and look at. Members are the
+  /// exception and are removed outright — a seat is not history, the expenses
+  /// referencing it are, and those keep their own copy of the id.
+  ///
+  /// Each kind is tried on its own. One refusal — a policy that says no, a
+  /// column a migration has not added yet — should cost that one deletion and
+  /// not the four beside it, and anything that fails keeps its tombstone and
+  /// is tried again on the next push.
+  Future<void> _applyTombstones(
+    Group group, {
+    required bool extended,
+    required bool settlementExtras,
+  }) async {
+    if (group.tombstones.isEmpty) return;
+    final db = Backend.client;
+    final done = <Tombstone>[];
+
+    Future<void> attempt(Tombstone t, Future<void> Function() call) async {
+      try {
+        await call();
+        done.add(t);
+      } catch (e) {
+        debugPrint('mull: could not delete ${t.kind.name} ${t.id} ($e)');
+      }
+    }
+
+    for (final t in [...group.tombstones]) {
+      switch (t.kind) {
+        case TombstoneKind.expense:
+          await attempt(
+            t,
+            () => db
+                .from('expenses')
+                .update({'deleted_at': DateTime.now().toIso8601String()})
+                .eq('id', t.id),
+          );
+        case TombstoneKind.recurring:
+          if (!extended) continue;
+          await attempt(
+            t,
+            () => db
+                .from('recurring_expenses')
+                .update({'deleted_at': DateTime.now().toIso8601String()})
+                .eq('id', t.id),
+          );
+        case TombstoneKind.settlement:
+          if (!settlementExtras) continue;
+          await attempt(
+            t,
+            () => db
+                .from('settlements')
+                .update({'deleted_at': DateTime.now().toIso8601String()})
+                .eq('id', t.id),
+          );
+        case TombstoneKind.member:
+          await attempt(t, () => db.from('members').delete().eq('id', t.id));
+      }
+    }
+
+    _store.clearTombstones(group, done);
   }
 
   /// A `date` column wants a date, not an instant. Sending the ISO timestamp
