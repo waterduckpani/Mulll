@@ -8,7 +8,6 @@ import 'package:path_provider/path_provider.dart';
 import '../core/dates.dart';
 import '../core/money.dart';
 import '../core/split.dart';
-import '../core/upi_receipt.dart';
 import 'models.dart';
 
 /// How many reminders one person may send another, and over what.
@@ -1393,41 +1392,6 @@ class MullStore extends ChangeNotifier {
     _untombstone(group, settlement.id, TombstoneKind.settlement);
     group.acked.remove('s:${settlement.id}');
     _commitGroup(group);
-  }
-
-  /// The debt a UPI receipt most likely pays off.
-  ///
-  /// Matched on the payee's VPA first and the amount second, across every
-  /// group, because the person sharing a receipt is not thinking about which
-  /// group it belongs to. Returns null rather than guessing when nothing lines
-  /// up — a receipt filed against the wrong debt is worse than one filed by
-  /// hand.
-  (Group, Transfer)? matchReceipt(UpiReceipt receipt) {
-    if (receipt.failed) return null;
-    final vpa = receipt.payeeUpiId?.toLowerCase();
-    final amount = receipt.amount;
-    if (vpa == null && amount == null) return null;
-
-    final byAmountOnly = <(Group, Transfer)>[];
-    for (final group in groups) {
-      final me = group.you?.id;
-      if (me == null) continue;
-      for (final transfer in simplify(group.balances)) {
-        if (transfer.from != me) continue; // only debts you are the one paying
-        final payee = group.memberById(transfer.to);
-        if (payee == null) continue;
-
-        final vpaMatches = vpa != null && payee.upiId?.toLowerCase() == vpa;
-        final amountMatches = amount != null && transfer.amount == amount;
-        if (vpaMatches && (amountMatches || amount == null)) return (group, transfer);
-        if (amountMatches) byAmountOnly.add((group, transfer));
-      }
-    }
-    // One debt of that amount and nothing else it could be: take it. Two, and
-    // the honest answer is none — it used to keep whichever it happened to see
-    // first, which is iteration order deciding who got paid. A receipt filed
-    // against the wrong debt is worse than one filed by hand.
-    return byAmountOnly.length == 1 ? byAmountOnly.first : null;
   }
 
   /// Every claim across every group that is waiting on you.

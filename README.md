@@ -18,8 +18,7 @@ The things it does that other split apps do not:
 - **A payment is claimed and then confirmed.** "Mark as settled" being a single
   unverified tap is what makes a shared ledger rot — one side taps it, the other
   never sees the money, and the balance is quietly wrong forever. Here the payer
-  claims and the payee confirms, and a UPI receipt shared into Mull carries the
-  amount and the reference as evidence. A claim nobody answered, and one that
+  claims and the payee confirms. A claim nobody answered, and one that
   was disputed, both stay findable and fixable.
 - **A schedule asks.** Rent goes up and people move out, so a due schedule
   surfaces as a card with the amount in an editable field. What you confirm is
@@ -57,7 +56,7 @@ flutter drive --driver=test_driver/integration_test.dart --target=integration_te
 ## Layout
 
 - `lib/core` — ₹ formatting and forgiving amount parsing (`28k`, `1.2L`), date and recurrence maths,
-  splitting and debt simplification, UPI payment links, UPI receipt reading
+  splitting and debt simplification, UPI payment links
 - `lib/data` — models and `MullStore` (local-first, one JSON file, debounced atomic writes),
   plus `remote/` for Supabase auth, friends and group sync
 - `lib/ui` — design tokens, surfaces, sheets, page scaffold, icons
@@ -82,20 +81,12 @@ Built from `Mull UI spec.pdf` and the eight exported screens (4A–4H). Four rul
 
 Dark is primary; the paper theme is an option in the profile sheet rather than half of a pair.
 There are no em dashes in anything the app shows you.
-- `ios/Shared` — Swift the app and its share extension both compile: Vision OCR, the receipt guess,
-  the App Group queue, the palette
 
-## The share extension
+## Where the share extension went
 
-Share a UPI payment screen into Mull and the debt it pays off settles itself.
-The extension runs Vision on device to show you what it read — it has no Flutter
-engine and never will, because you are two taps from the back button — but it
-decides nothing. `UpiReceiptReader` in Dart, which has the tests, is what matches
-a receipt to a debt when the app next opens.
-
-Needs the **App Group** (`group.in.mull.app`) enabled on both targets, and the
-extension embedded *before* the Thin Binary phase or the Flutter iOS build
-deadlocks.
+Until 2026-09-21 a share extension read UPI receipts shared into Mull and filed them as
+evidence against a debt. It was switched off before TestFlight; the extension, the Vision OCR and
+`UpiReceiptReader` are all at the **`share-extension-era`** tag.
 
 ## Where the wishlist went
 

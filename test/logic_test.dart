@@ -1,10 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mull/core/dates.dart';
 import 'package:mull/core/money.dart';
-import 'package:mull/core/ocr.dart';
 import 'package:mull/core/split.dart';
 import 'package:mull/core/upi.dart';
-import 'package:mull/core/upi_receipt.dart';
 import 'package:mull/data/models.dart';
 import 'package:mull/data/store.dart';
 
@@ -1078,29 +1076,6 @@ void main() {
     });
   });
 
-  group('matching a receipt when two debts look alike', () {
-    test('two debts of the same amount are not guessed between', () {
-      final store = MullStore.memory();
-      store.completeOnboarding(name: 'Bharat');
-      for (final name in ['Goa', 'Flat']) {
-        final g = store.addGroup(name, ['Ananya']);
-        final me = g.you!.id;
-        final her = g.members.firstWhere((m) => !m.isYou).id;
-        store.addExpense(
-          g,
-          description: 'Thing',
-          amount: 1000,
-          payerId: her,
-          shares: splitEqually(1000, [me, her]),
-        );
-      }
-      // 500 owed in each, no VPA to tell them apart. Filing it against
-      // whichever came first is iteration order deciding who got paid.
-      final receipt = UpiReceipt(amount: 500);
-      expect(store.matchReceipt(receipt), isNull);
-    });
-  });
-
   group('reminders', () {
     MullStore owed() {
       final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19, 10);
@@ -1306,136 +1281,6 @@ void main() {
     });
   });
 
-  group('UPI receipts', () {
-    OcrLine at(String text, double y, double h) => OcrLine(text, y: y, h: h);
-
-    test('reads a Google Pay receipt', () {
-      final r = UpiReceiptReader.parse([
-        at('9:41', .012, .013),
-        at('Completed', .18, .014),
-        at('₹2,000', .26, .040),
-        at('Paid to Sahil Mehta', .33, .016),
-        at('sahil@okaxis', .37, .013),
-        at('UPI transaction ID  447126558301', .62, .012),
-      ]);
-      expect(r.amount, 2000);
-      expect(r.utr, '447126558301');
-      expect(r.payeeUpiId, 'sahil@okaxis');
-      expect(r.payeeName, 'Sahil Mehta');
-      expect(r.failed, isFalse);
-    });
-
-    test('reads a PhonePe receipt, ignoring the account the money left', () {
-      final r = UpiReceiptReader.parse([
-        at('Payment Successful', .14, .018),
-        at('₹1,240', .23, .044),
-        at('Paid to KABIR VERMA', .31, .015),
-        at('kabirv@ybl', .35, .012),
-        at('Debited from  ananya@okhdfc', .48, .012),
-        at('UTR: 528401234567', .55, .012),
-      ]);
-      expect(r.amount, 1240);
-      expect(r.utr, '528401234567');
-      expect(r.payeeUpiId, 'kabirv@ybl', reason: 'not the account it was debited from');
-      expect(r.failed, isFalse);
-    });
-
-    test('picks the amount over other numbers by how big it is set', () {
-      final r = UpiReceiptReader.parse([
-        at('₹500', .24, .042), // the hero
-        at('Balance ₹12,480', .70, .011),
-        at('To ramesh@paytm', .34, .013),
-        at('UPI Ref No 528401234567', .60, .012),
-      ]);
-      expect(r.amount, 500);
-    });
-
-    test('finds a bare reference when nothing labels it', () {
-      final r = UpiReceiptReader.parse([
-        at('₹300', .25, .040),
-        at('to@okicici', .33, .013),
-        at('447126558301', .61, .011),
-      ]);
-      expect(r.utr, '447126558301');
-    });
-
-    test('a phone number is not a reference', () {
-      final r = UpiReceiptReader.parse([
-        at('₹300', .25, .040),
-        at('9876543210', .40, .012),
-      ]);
-      expect(r.utr, isNull);
-    });
-
-    test('says so when the payment did not go through', () {
-      final r = UpiReceiptReader.parse([
-        at('Payment Failed', .14, .018),
-        at('₹1,240', .23, .044),
-        at('kabirv@ybl', .35, .012),
-      ]);
-      expect(r.failed, isTrue);
-    });
-
-    test('admits when a screenshot is not a receipt at all', () {
-      expect(UpiReceiptReader.parse(const []).isEmpty, isTrue);
-      expect(UpiReceiptReader.parse([at('SATIN EFFECT SHIRT', .5, .02)]).isEmpty, isTrue);
-    });
-  });
-  group('matching a receipt to a debt', () {
-    MullStore owing() {
-      final s = MullStore.memory()..clock = () => DateTime(2026, 9, 19);
-      s.completeOnboarding(name: 'Ananya');
-      s.addGroup('Goa', ['Sahil']);
-      final g = s.groups.single;
-      final sahil = g.members.firstWhere((m) => m.name == 'Sahil')..upiId = 'sahil@okaxis';
-      // Sahil paid for something, so you owe him 1,000.
-      s.addExpense(
-        g,
-        description: 'Airbnb',
-        amount: 2000,
-        payerId: sahil.id,
-        shares: splitEqually(2000, g.members.map((m) => m.id).toList()),
-      );
-      return s;
-    }
-
-    test('matches on the payee and the amount', () {
-      final s = owing();
-      final match = s.matchReceipt(const UpiReceipt(amount: 1000, payeeUpiId: 'sahil@okaxis', utr: '4471'));
-      expect(match, isNotNull);
-      expect(match!.$1.title, 'Goa');
-      expect(match.$2.amount, 1000);
-    });
-
-    test('a failed payment matches nothing', () {
-      final s = owing();
-      expect(
-        s.matchReceipt(const UpiReceipt(amount: 1000, payeeUpiId: 'sahil@okaxis', failed: true)),
-        isNull,
-      );
-    });
-
-    test('will not guess when nothing lines up', () {
-      final s = owing();
-      expect(s.matchReceipt(const UpiReceipt(amount: 7777, payeeUpiId: 'nobody@okaxis')), isNull);
-      expect(s.matchReceipt(const UpiReceipt()), isNull);
-    });
-
-    test('ignores debts you are not the one paying', () {
-      final s = owing();
-      final g = s.groups.single;
-      // Now you have paid for more, so Sahil owes you instead.
-      s.addExpense(
-        g,
-        description: 'Flights',
-        amount: 8000,
-        payerId: g.you!.id,
-        shares: splitEqually(8000, g.members.map((m) => m.id).toList()),
-      );
-      expect(g.yourBalance, greaterThan(0));
-      expect(s.matchReceipt(const UpiReceipt(amount: 3000, payeeUpiId: 'sahil@okaxis')), isNull);
-    });
-  });
   group('UPI', () {
     test('accepts the handles Indian banks actually issue', () {
       for (final id in ['ananya@okhdfc', 'sahil.mehta@okaxis', 'kabir-v@ybl', '9876543210@paytm']) {

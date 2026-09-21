@@ -7,7 +7,6 @@ import '../../core/dates.dart';
 import '../../core/money.dart';
 import '../../core/split.dart';
 import '../../core/upi.dart';
-import '../../core/upi_receipt.dart';
 import '../../data/models.dart';
 import '../../data/remote/auth_service.dart';
 import '../../data/remote/friends_service.dart';
@@ -490,64 +489,6 @@ class _SettleSheetState extends State<_SettleSheet> {
       ),
     );
   }
-}
-
-/// A receipt you shared into Mull, matched against what you owe.
-///
-/// This is the loop that makes "I already sent it" mean something: the claim
-/// arrives carrying the amount and the UPI reference off the payment itself,
-/// so the person owed is confirming evidence rather than taking your word.
-Future<void> showReceiptSettle(
-  BuildContext context,
-  Group group,
-  Transfer transfer,
-  UpiReceipt receipt,
-) {
-  final store = context.readStore;
-  final payee = group.memberById(transfer.to);
-
-  return showMullSheet(
-    context,
-    fitContent: true,
-    builder: (sheet) => Padding(
-      padding: const EdgeInsets.fromLTRB(30, 26, 30, 26),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Eyebrow('Looks like you paid'),
-          const SizedBox(height: 10),
-          Text(inr(receipt.amount!), style: excon(44, tracking: -.03, color: sheet.c.ink)),
-          const SizedBox(height: 8),
-          Text(
-            [
-              if (payee != null) 'To ${payee.name} · ${group.title}',
-              if (receipt.utr != null) 'UPI ref ${receipt.utr}',
-            ].join('\n'),
-            style: ranade(13, height: 1.55, color: sheet.c.ink3),
-          ),
-          const SizedBox(height: 22),
-          PillButton(
-            'Record it',
-            onTap: () {
-              store.settleUp(
-                group,
-                fromId: transfer.from,
-                toId: transfer.to,
-                amount: receipt.amount!,
-                utr: receipt.utr,
-              );
-              HapticFeedback.mediumImpact();
-              Navigator.of(sheet).pop();
-              Toast.show(context, '${inr(receipt.amount!)} recorded');
-            },
-          ),
-          const SizedBox(height: 8),
-          SecondaryButton('Not this one', onTap: () => Navigator.of(sheet).pop()),
-        ],
-      ),
-    ),
-  );
 }
 
 /// After sending someone to their UPI app, the only honest thing is to ask.

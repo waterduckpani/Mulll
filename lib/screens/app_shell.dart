@@ -3,22 +3,19 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
-import '../core/inbox.dart';
 import '../core/money.dart';
 import '../data/notices.dart';
 import '../data/store.dart';
 import '../ui/sheet.dart';
 import '../ui/tokens.dart';
-import 'groups/group_sheets.dart';
 import 'home_screen.dart';
 import 'notices_sheet.dart';
 
 /// The app around the home screen.
 ///
 /// There is no tab bar to hold, so this is only what a screen cannot do for
-/// itself: take in what was shared from other apps, notice when the day has
-/// changed under a backgrounded app, and let sheets push the whole thing back
-/// as they rise.
+/// itself: notice when the day has changed under a backgrounded app, and let
+/// sheets push the whole thing back as they rise.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -28,7 +25,6 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   final _navigator = GlobalKey<NavigatorState>();
-  bool _draining = false;
   MullStore? _store;
   NoticesInbox? _inbox;
 
@@ -38,7 +34,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_announceAutoAdded());
-      _drainInbox();
     });
   }
 
@@ -92,9 +87,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       // not in memory, and the badge is what tells anyone to go and look.
       unawaited(_inbox?.refresh());
       unawaited(_announceAutoAdded());
-      // Receipts are shared while Mull is backgrounded — you pay in GPay, then
-      // come back here — so resuming is the common case, not launching.
-      _drainInbox();
     } else if (state == AppLifecycleState.paused) {
       _store?.flush();
     }
@@ -129,58 +121,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       );
     } finally {
       _addingDue = false;
-    }
-  }
-
-  /// Takes in whatever was shared into Mull from other apps.
-  Future<void> _drainInbox() async {
-    if (_draining || !mounted) return;
-    _draining = true;
-    try {
-      // Wait for a clear screen *before* draining, not after. Reading the queue
-      // deletes it, so anything pulled while a sheet is up would sit in memory
-      // with nothing on disk to recover it — closing the app there would lose
-      // the share silently.
-      await _waitForClearScreen();
-      if (!mounted) return;
-
-      final shared = await Inbox.drain();
-      final store = _store!;
-      var unmatched = 0;
-
-      for (final item in shared) {
-        if (!item.isUsable) {
-          unmatched++;
-          continue;
-        }
-        final match = store.matchReceipt(item.receipt);
-        if (match == null) {
-          unmatched++;
-          continue;
-        }
-        await _waitForClearScreen();
-        if (!mounted) return;
-        await showReceiptSettle(context, match.$1, match.$2, item.receipt);
-      }
-
-      // Silence after a share reads as the app having lost it. Better to say
-      // there was nothing it lined up with than to leave the person wondering.
-      if (unmatched > 0 && mounted) {
-        Toast.show(
-          context,
-          unmatched == 1
-              ? "That receipt didn't match anything you owe"
-              : "$unmatched receipts didn't match anything you owe",
-        );
-      }
-    } finally {
-      _draining = false;
-    }
-  }
-
-  Future<void> _waitForClearScreen() async {
-    while (mounted && SheetDepth.value.value > 0) {
-      await Future.delayed(const Duration(milliseconds: 600));
     }
   }
 
