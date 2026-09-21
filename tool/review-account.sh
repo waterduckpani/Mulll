@@ -55,15 +55,22 @@ else
 fi
 
 echo "Seeding the demo groups"
-(cd supabase && supabase db query --linked -f seed/review_account.sql > /dev/null)
+# -f resolves from the project root, not the working directory.
+SEEDED=$(cd supabase && supabase db query --linked -f "$PWD/seed/review_account.sql" 2>&1)
+case "$SEEDED" in
+  *'"_tag":"Error"'*|*ERROR*) echo "Seeding FAILED: $SEEDED"; exit 1 ;;
+esac
 
 # Proves the sign-in the reviewer will do, end to end, with the public key.
 ANON=$(supabase projects api-keys --project-ref "$REF" -o json \
   | python3 -c 'import json,sys; print(next(k["api_key"] for k in json.load(sys.stdin) if k["name"] == "anon"))')
-curl -sf -X POST "$URL/auth/v1/token?grant_type=password" \
+RESULT=$(curl -s -X POST "$URL/auth/v1/token?grant_type=password" \
   -H "apikey: $ANON" -H "Content-Type: application/json" \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" > /dev/null \
-  && echo "Password sign-in works."
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}")
+case "$RESULT" in
+  *access_token*) echo "Password sign-in works." ;;
+  *) echo "Password sign-in FAILED: $RESULT"; exit 1 ;;
+esac
 
 echo
 echo "For App Store Connect -> App Review Information:"
