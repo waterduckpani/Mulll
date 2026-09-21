@@ -14,6 +14,11 @@
 # here, stored in .secrets/push-webhook, and never printed.
 
 set -e
+# Read the key path before changing directory, or a relative path breaks.
+if [ -n "$1" ]; then
+  KEY_FILE=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+  grep -q "BEGIN PRIVATE KEY" "$KEY_FILE" || { echo "$1 is not a .p8 key"; exit 1; }
+fi
 cd "$(dirname "$0")/.."
 REF=nfuujjyscybqdcfryiwk
 
@@ -28,9 +33,9 @@ cd supabase
 supabase secrets set --project-ref "$REF" \
   PUSH_WEBHOOK_SECRET="$SECRET" APNS_TEAM_ID=B3F76H2UHH APNS_TOPIC=in.mull.app > /dev/null
 
-if [ -n "$1" ]; then
-  KEY_ID=$(basename "$1" .p8 | sed 's/^AuthKey_//')
-  supabase secrets set --project-ref "$REF" APNS_KEY_ID="$KEY_ID" APNS_PRIVATE_KEY="$(cat "$1")" > /dev/null
+if [ -n "${KEY_FILE:-}" ]; then
+  KEY_ID=$(basename "$KEY_FILE" .p8 | sed 's/^AuthKey_//')
+  supabase secrets set --project-ref "$REF" APNS_KEY_ID="$KEY_ID" APNS_PRIVATE_KEY="$(cat "$KEY_FILE")" > /dev/null
   echo "APNs key $KEY_ID installed."
 fi
 
