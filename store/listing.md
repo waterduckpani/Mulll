@@ -86,6 +86,7 @@ Tracking: **No, we do not use data for tracking.**
 | Contact Info → Name | Yes | Yes | No | App Functionality |
 | Contact Info → Email Address | Yes | Yes | No | App Functionality |
 | Contact Info → Phone Number | Yes (only if typed in to invite someone) | Yes | No | App Functionality |
+| Identifiers → User ID (the account id) | Yes | Yes | No | App Functionality |
 | Financial Info → Other Financial Info (UPI ID) | Yes | Yes | No | App Functionality |
 | User Content → Other User Content (expenses, groups) | Yes | Yes | No | App Functionality |
 | Diagnostics → Crash Data | Yes | **No** | No | App Functionality |
