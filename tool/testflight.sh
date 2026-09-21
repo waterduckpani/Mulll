@@ -38,4 +38,4 @@ flutter build ipa --release \
 
 # Never ship the sample data: it is not in this build unless MULL_SAMPLE is
 # defined, and it is not, above. Said here because it has leaked before.
-open build/ios/archive/Runner.xcarchive
+[ -z "$NO_OPEN" ] && open build/ios/archive/Runner.xcarchive
