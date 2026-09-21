@@ -6,6 +6,8 @@
 /// exists to serve that.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -85,6 +87,9 @@ class _FriendsSheetState extends State<_FriendsSheet> {
     setState(() => _busy = false);
     if (result.isOk) {
       HapticFeedback.mediumImpact();
+      // An accepted request can hand over seats in groups, so the ledger may
+      // have just grown.
+      unawaited(context.readStore.pullNow());
       await _load();
     } else if (mounted && result.error != null) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.error!)));

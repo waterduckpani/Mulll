@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/upi.dart';
 import '../data/remote/auth_service.dart';
 import '../data/remote/backend.dart';
 import '../data/remote/friends_service.dart';
@@ -14,6 +17,36 @@ import 'home_screen.dart' show showHowItWorks;
 
 Future<void> showProfileSheet(BuildContext context) =>
     showMullSheet(context, height: 780, builder: (_) => const _ProfileSheet());
+
+/// A yes-or-no sheet for something that cannot be taken back.
+Future<bool> _confirm(
+  BuildContext context, {
+  required String title,
+  required String body,
+  required String action,
+}) async {
+  final ok = await showMullSheet<bool>(
+    context,
+    fitContent: true,
+    builder: (sheet) => Padding(
+      padding: const EdgeInsets.fromLTRB(30, 30, 30, 26),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(title, style: excon(28, tracking: -.02, color: sheet.c.ink)),
+          const SizedBox(height: 10),
+          Text(body, style: ranade(14, height: 1.6, color: sheet.c.ink3)),
+          const SizedBox(height: 24),
+          PillButton(action, onTap: () => Navigator.of(sheet).pop(true)),
+          const SizedBox(height: 8),
+          SecondaryButton('Cancel', onTap: () => Navigator.of(sheet).pop(false)),
+        ],
+      ),
+    ),
+  );
+  return ok == true;
+}
 
 /// Whether groups are shared with anyone, and the way in or out.
 class _AccountRow extends StatefulWidget {
@@ -51,12 +84,51 @@ class _AccountRowState extends State<_AccountRow> {
           onTap: () async {
             final store = context.readStore;
             final nav = Navigator.of(context);
+            // Everything local goes with the account, so anything that has not
+            // reached the server yet goes with it. Say so first.
+            if (store.hasPendingChanges &&
+                !await _confirm(
+                  context,
+                  title: 'Not everything has synced',
+                  body: 'Some changes on this phone have not reached the server yet. '
+                      'Signing out now loses them. Connect first to keep them.',
+                  action: 'Sign out anyway',
+                )) {
+              return;
+            }
             await AuthService.signOut();
-            // Groups belong to the account, not the phone. Leaving them behind
-            // would show the next person to sign in on this device a ledger
-            // that is not theirs — and the first edit would push it back up
-            // under their name.
-            store.replaceGroups(const []);
+            // Groups and the profile belong to the account, not the phone.
+            // Leaving them behind showed the next person to sign in a ledger
+            // that was not theirs, under your name and with your UPI ID in
+            // their reminders.
+            await store.forgetAccount();
+            nav.pop();
+          },
+        ),
+        const SizedBox(height: 8),
+        SecondaryButton(
+          'Delete account',
+          onTap: () async {
+            final store = context.readStore;
+            final nav = Navigator.of(context);
+            final messenger = ScaffoldMessenger.of(context);
+            if (!await _confirm(
+              context,
+              title: 'Delete your account?',
+              body: 'Your account, friends and inbox are deleted. The groups you were '
+                  'in keep their history for everyone else, under your name, with '
+                  'no way left to reach or pay you. This cannot be undone.',
+              action: 'Delete my account',
+            )) {
+              return;
+            }
+            final result = await AuthService.deleteAccount();
+            if (!result.isOk) {
+              messenger.showSnackBar(SnackBar(content: Text(result.error!)));
+              return;
+            }
+            HapticFeedback.heavyImpact();
+            await store.forgetAccount();
             nav.pop();
           },
         ),
@@ -74,6 +146,20 @@ class _ProfileSheet extends StatefulWidget {
 
 class _ProfileSheetState extends State<_ProfileSheet> {
   late final _name = TextEditingController(text: context.readStore.profile.name);
+
+  /// The server copy of your name, saved once typing stops. It never used to
+  /// be saved from here at all, and the pull takes your seat's name from the
+  /// account — so a rename snapped back within twenty seconds and nobody else
+  /// ever saw it.
+  Timer? _saveName;
+
+  void _nameChanged(String value) {
+    final name = value.trim();
+    context.readStore.updateProfile((p) => p.name = name);
+    _saveName?.cancel();
+    if (name.isEmpty) return;
+    _saveName = Timer(const Duration(milliseconds: 700), () => AuthService.saveProfile(name: name));
+  }
 
   /// A count, and a nudge when someone is waiting on an answer — a request
   /// nobody notices is the same as no request.
@@ -101,6 +187,12 @@ class _ProfileSheetState extends State<_ProfileSheet> {
 
   @override
   void dispose() {
+    // Closing the sheet mid-word still saves the word.
+    if (_saveName?.isActive ?? false) {
+      _saveName!.cancel();
+      final name = _name.text.trim();
+      if (name.isNotEmpty) unawaited(AuthService.saveProfile(name: name));
+    }
     _name.dispose();
     super.dispose();
   }
@@ -112,26 +204,42 @@ class _ProfileSheetState extends State<_ProfileSheet> {
     final saved = await showMullSheet<String>(
       context,
       height: 420,
-      builder: (sheet) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const SheetHeader('Your UPI ID'),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(30, 12, 30, 0),
-            child: BigField(
-              controller: controller,
-              autofocus: true,
-              size: 22,
-              hint: 'name@bank',
-              help: const Text('Goes into the summaries you send, so people can pay you back.'),
-            ),
-          ),
-          const Spacer(),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
-            child: PillButton('Save', onTap: () => Navigator.of(sheet).pop(controller.text)),
-          ),
-        ],
+      // People pay you at whatever is saved here, and a handle with a typo in
+      // it either fails in their UPI app or pays somebody else.
+      builder: (sheet) => ListenableBuilder(
+        listenable: controller,
+        builder: (sheet, _) {
+          final typed = controller.text.trim();
+          final looksRight = typed.isEmpty || isUpiId(typed);
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const SheetHeader('Your UPI ID'),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(30, 12, 30, 0),
+                child: BigField(
+                  controller: controller,
+                  autofocus: true,
+                  size: 22,
+                  hint: 'name@bank',
+                  help: Text(
+                    looksRight
+                        ? 'Goes into the summaries you send, so people can pay you back.'
+                        : "That doesn't look like a UPI ID. They usually read name@bank.",
+                  ),
+                ),
+              ),
+              const Spacer(),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
+                child: PillButton(
+                  'Save',
+                  onTap: looksRight ? () => Navigator.of(sheet).pop(controller.text) : null,
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
     controller.dispose();
@@ -156,11 +264,18 @@ class _ProfileSheetState extends State<_ProfileSheet> {
             Text('Start over?', style: excon(28, tracking: -.02, color: sheet.c.ink)),
             const SizedBox(height: 10),
             Text(
-              'Every group, expense and settlement is erased from this phone.',
+              Backend.isSignedIn
+                  ? 'Clears this phone. Your groups are kept on your account and come '
+                        'back the next time Mull syncs. To remove your account, use '
+                        'Delete account instead.'
+                  : 'Every group, expense and settlement is erased from this phone.',
               style: ranade(14, height: 1.6, color: sheet.c.ink3),
             ),
             const SizedBox(height: 24),
-            PillButton('Erase everything', onTap: () => Navigator.of(sheet).pop(true)),
+            PillButton(
+              Backend.isSignedIn ? 'Clear this phone' : 'Erase everything',
+              onTap: () => Navigator.of(sheet).pop(true),
+            ),
             const SizedBox(height: 8),
             SecondaryButton('Cancel', onTap: () => Navigator.of(sheet).pop(false)),
           ],
@@ -194,7 +309,7 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                   controller: _name,
                   hint: 'Your name',
                   capitalization: TextCapitalization.words,
-                  onChanged: (v) => store.updateProfile((p) => p.name = v.trim()),
+                  onChanged: _nameChanged,
                   help: const Text('The name people see next to your share of a bill.'),
                 ),
                 const SizedBox(height: 28),

@@ -22,7 +22,9 @@ Uri upiPaymentUri({required String upiId, required String name, required int amo
     queryParameters: {
       'pa': upiId.trim(),
       'pn': name.trim(),
-      'am': amount.toString(),
+      // Two decimal places, as the UPI linking spec writes it. Several PSP
+      // apps read a bare "1240" fine and a few refuse it as malformed.
+      'am': '$amount.00',
       'cu': 'INR',
       if (note != null && note.trim().isNotEmpty) 'tn': note.trim(),
     },

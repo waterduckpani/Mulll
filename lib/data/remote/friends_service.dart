@@ -12,6 +12,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+import 'auth_service.dart';
 import 'backend.dart';
 
 /// Which way a pending request is pointing, from your side of it.
@@ -160,9 +161,15 @@ class FriendsService {
   /// Accepting goes through the server too: a request sent before you had an
   /// account names an email rather than a user, and attaching it to you is the
   /// one identity change the guard trigger allows — but only from here.
+  ///
+  /// Accepting is also what lets a seat waiting on your address become yours:
+  /// `claim_invitations()` only claims into a group where someone you have
+  /// accepted already sits, so it is asked again straight away rather than on
+  /// the next launch.
   static Future<FriendsResult> accept(String friendshipId) async {
     try {
       await Backend.client.rpc('accept_friend_request', params: {'friendship': friendshipId});
+      await AuthService.claimSeats();
       return const FriendsResult.ok();
     } catch (e) {
       debugPrint('mull: accept failed ($e)');

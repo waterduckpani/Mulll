@@ -312,7 +312,8 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       size: 24,
       hint: 'name@bank',
       textInputAction: TextInputAction.done,
-      onSubmitted: (_) => _finish(),
+      help: _upiLooksRight ? null : const Text("That doesn't look like a UPI ID. They usually read name@bank."),
+      onSubmitted: (_) => _upiLooksRight ? _finish() : null,
     ),
     _ => null,
   };
@@ -325,8 +326,15 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     // Deliberately skippable: a UPI ID is not something everyone has to hand,
     // and blocking setup on it would lose people over a string they can paste
     // in thirty seconds from the profile screen.
-    _Step.upi => true,
+    // Skippable, but not wrong: people pay you at whatever is typed here, and
+    // a handle with a typo either fails in their UPI app or pays a stranger.
+    _Step.upi => _upiLooksRight,
   };
+
+  bool get _upiLooksRight {
+    final typed = _upi.text.trim();
+    return typed.isEmpty || isUpiId(typed);
+  }
 
   (String, VoidCallback?) get _cta => switch (_step) {
     _Step.welcome => (

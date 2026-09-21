@@ -136,6 +136,23 @@ class AuthService {
     }
   }
 
+  /// Deletes the account, server side, then ends the session.
+  ///
+  /// The ledgers other people share with you stay — they are their history
+  /// too — with your seats left under your name and every way of reaching or
+  /// paying you removed. See `delete_my_account()` in the 2026-09-21 migration.
+  static Future<AuthResult> deleteAccount() async {
+    if (!Backend.isAvailable || Backend.user == null) return const AuthResult.failed(_noBackend);
+    try {
+      await Backend.client.rpc('delete_my_account');
+    } catch (e) {
+      debugPrint('mull: delete_my_account failed ($e)');
+      return const AuthResult.failed(_offline);
+    }
+    await signOut();
+    return const AuthResult.ok();
+  }
+
   /// Keeps the profile row in step with what the user has told the app.
   static Future<void> saveProfile({String? name, String? upiId}) async {
     final id = Backend.user?.id;

@@ -99,50 +99,160 @@ class MullStore extends ChangeNotifier {
     onGroupChanged?.call(group);
   }
 
-  /// Replaces the shared ledger with what the server sent.
+  /// Folds what the server sent into what is on this phone.
+  ///
+  /// The server is the authority on every row this phone has not changed. A
+  /// row that *has* been changed here and not yet accepted — its print differs
+  /// from [Group.acked] — keeps the local version, and so does a row the
+  /// server has never seen. This used to replace everything, which meant an
+  /// edit whose push had failed (no signal, a refused policy) was erased by
+  /// the next pull, twenty seconds later, from the phone that made it.
+  ///
+  /// A row the server used to have and no longer returns was deleted by
+  /// somebody else and goes, edited here or not: an edit to something that no
+  /// longer exists has nowhere to land. A row this phone deleted stays deleted
+  /// until its tombstone has been passed on, even if the server still has it.
   ///
   /// [keepLocalSchedules] is for a project that has not had the recurring
   /// migration applied: the server cannot carry schedules, so an answer with
   /// none means "this server does not do schedules", not "they were deleted".
-  /// Once the tables are there the server is the authority and this is false,
-  /// or deleting a schedule on one phone would have it resurrected by the next
-  /// pull on another.
   void replaceGroups(List<Group> incoming, {bool keepLocalSchedules = false}) {
-    // Anything the server has never acknowledged survives a pull.
-    //
-    // The server is the authority on groups it knows about, so a group missing
-    // from its answer has genuinely been deleted and should go. But a group it
-    // has never seen is a different thing entirely: the push has not landed
-    // yet, or failed. Treating those two cases the same means one failed push
-    // silently deletes work that is on screen in front of someone — which is
-    // exactly what a bad trigger did here once already.
+    final held = {for (final g in groups) g.id: g};
+
+    // A group the server has never acknowledged survives a pull it is missing
+    // from: the push has not landed yet, or failed. A group it *has* seen and
+    // no longer returns was deleted, or you left it.
     final unsynced = [
       for (final g in groups)
         if (!g.hasReachedServer && !incoming.any((i) => i.id == g.id)) g,
     ];
 
-    // When you last chased someone is this phone's business and has no column
-    // anywhere, so it has to survive a pull or every refresh re-arms the nudge.
-    final held = {for (final g in groups) g.id: g};
-    for (final group in incoming) {
-      final previous = held[group.id];
-      if (previous == null) continue;
-      if (keepLocalSchedules && group.recurring.isEmpty) {
-        group.recurring.addAll(previous.recurring);
-      }
-      for (final member in group.members) {
-        if (member.nudges.isEmpty) {
-          member.nudges.addAll(previous.memberById(member.id)?.nudges ?? const []);
-        }
-      }
-    }
+    final merged = <Group>[
+      for (final server in incoming)
+        if (!pendingGroupDeletes.contains(server.id))
+          held[server.id] == null
+              ? server
+              : _merge(held[server.id]!, server, keepLocalSchedules: keepLocalSchedules),
+    ];
 
     groups
       ..clear()
-      ..addAll(incoming)
+      ..addAll(merged)
       ..addAll(unsynced);
     _commit();
   }
+
+  Group _merge(Group local, Group server, {required bool keepLocalSchedules}) {
+    final before = local.acked;
+    // A group synced by a version of Mull that kept no record of what the
+    // server had. There is nothing to tell a local edit from a stale copy by,
+    // so the server wins this once, which is what every pull used to do.
+    final legacy = before.isEmpty && local.hasReachedServer;
+    final gone = {for (final t in local.tombstones) '${t.kind.name}:${t.id}'};
+
+    List<T> rows<T>(
+      String prefix,
+      TombstoneKind kind,
+      List<T> mine,
+      List<T> theirs,
+      String Function(T) idOf,
+      String Function(T) printOf,
+    ) {
+      final localById = {for (final r in mine) idOf(r): r};
+      final out = <T>[];
+      for (final row in theirs) {
+        final id = idOf(row);
+        if (gone.contains('${kind.name}:$id')) continue;
+        final here = localById[id];
+        final changedHere = here != null && !legacy && before['$prefix:$id'] != printOf(here);
+        out.add(changedHere ? here : row);
+      }
+      final served = {for (final r in theirs) idOf(r)};
+      for (final row in mine) {
+        final id = idOf(row);
+        // Never accepted by the server, so not a deletion: still on its way up.
+        if (!served.contains(id) && !before.containsKey('$prefix:$id')) out.add(row);
+      }
+      return out;
+    }
+
+    final members = rows<Member>(
+      'm', TombstoneKind.member, local.members, server.members, (m) => m.id, (m) => m.syncPrint,
+    );
+    // When you last chased someone is this phone's business and has no column
+    // anywhere, so it has to survive a pull or every refresh re-arms the nudge.
+    for (final member in members) {
+      if (member.nudges.isEmpty) {
+        member.nudges.addAll(local.memberById(member.id)?.nudges ?? const []);
+      }
+    }
+
+    // Only an admin's rename is kept — anyone else's would be refused by the
+    // server, and holding it here would hold it forever.
+    final groupChangedHere = !legacy && local.youAreAdmin && before['g'] != local.groupPrint;
+    final acked = Map.of(server.printed);
+    final recurring = keepLocalSchedules && server.recurring.isEmpty
+        ? local.recurring
+        : rows<Recurring>(
+            'r', TombstoneKind.recurring, local.recurring, server.recurring, (r) => r.id, (r) => r.syncPrint,
+          );
+    if (keepLocalSchedules && server.recurring.isEmpty) {
+      for (final e in before.entries) {
+        if (e.key.startsWith('r:')) acked[e.key] = e.value;
+      }
+    }
+
+    return Group(
+      id: server.id,
+      name: groupChangedHere ? local.name : server.name,
+      kind: server.kind,
+      icon: groupChangedHere ? local.icon : server.icon,
+      members: members,
+      expenses: rows<Expense>(
+        'e', TombstoneKind.expense, local.expenses, server.expenses, (e) => e.id, (e) => e.syncPrint,
+      ),
+      settlements: rows<Settlement>(
+        's', TombstoneKind.settlement, local.settlements, server.settlements, (s) => s.id, (s) => s.syncPrint,
+      ),
+      recurring: recurring,
+      tombstones: local.tombstones,
+      acked: acked,
+      createdAt: server.createdAt,
+      syncedAt: server.syncedAt,
+    );
+  }
+
+  /// Groups deleted on this phone that the server has not yet been told
+  /// about. Kept, and persisted, for the same reason as [Group.tombstones]: a
+  /// delete made with no signal used to be forgotten, and the next pull
+  /// handed the group straight back.
+  final Set<String> pendingGroupDeletes = {};
+
+  /// The sync saying the server has the deletion.
+  void clearGroupDelete(String groupId) {
+    if (pendingGroupDeletes.remove(groupId)) _commit();
+  }
+
+  /// Records that the server accepted these rows as they were printed.
+  void ackRows(Group group, Map<String, String> prints) {
+    if (prints.isEmpty) return;
+    group.acked.addAll(prints);
+    _commit();
+  }
+
+  /// Set by the sync when a push or pull has failed and cleared once
+  /// everything has gone up. Not persisted: it describes this session.
+  bool syncTrouble = false;
+
+  void setSyncTrouble(bool value) {
+    if (syncTrouble == value) return;
+    syncTrouble = value;
+    notifyListeners();
+  }
+
+  /// Whether anything on this phone has not reached the server yet.
+  bool get hasPendingChanges =>
+      pendingGroupDeletes.isNotEmpty || groups.any((g) => g.hasPendingChanges);
 
   /// Notes that the server has taken a copy. Local-only: re-pushing here would
   /// loop, since a push is what got us here.
@@ -213,6 +323,9 @@ class MullStore extends ChangeNotifier {
     groups
       ..clear()
       ..addAll((j['groups'] as List? ?? []).map((e) => Group.fromJson((e as Map).cast())));
+    pendingGroupDeletes
+      ..clear()
+      ..addAll((j['pendingGroupDeletes'] as List? ?? const []).cast<String>());
     _adoptLegacyRepeats(j);
   }
 
@@ -264,6 +377,7 @@ class MullStore extends ChangeNotifier {
     'version': 2,
     'profile': profile.toJson(),
     'groups': groups.map((e) => e.toJson()).toList(),
+    'pendingGroupDeletes': pendingGroupDeletes.toList(),
   };
 
   void _commit() {
@@ -468,14 +582,26 @@ class MullStore extends ChangeNotifier {
 
   void updateGroup(Group group) => _commitGroup(group);
 
-  void deleteGroup(Group group) {
+  /// Only an admin may delete a group — the server refuses anyone else, and
+  /// a delete the server refuses used to vanish here and reappear on the next
+  /// pull. Someone who is not an admin leaves instead.
+  bool deleteGroup(Group group) {
+    if (!group.youAreAdmin) return false;
     groups.removeWhere((g) => g.id == group.id);
+    if (group.hasReachedServer) pendingGroupDeletes.add(group.id);
     _commit();
     onGroupDeleted?.call(group.id);
+    return true;
   }
 
+  /// Undo. The delete may already have reached the server, so the group's row
+  /// is marked unsent, which makes the push say `deleted_at: null` out loud —
+  /// an upsert that leaves the column alone would bring it back on this phone
+  /// only, and the next pull would take it away again.
   void restoreGroup(Group group) {
     if (groups.any((g) => g.id == group.id)) return;
+    pendingGroupDeletes.remove(group.id);
+    group.acked.remove('g');
     groups.add(group);
     _commitGroup(group);
   }
@@ -640,6 +766,7 @@ class MullStore extends ChangeNotifier {
 
   Expense addExpense(
     Group group, {
+    String? id,
     required String description,
     required int amount,
     required String payerId,
@@ -650,6 +777,7 @@ class MullStore extends ChangeNotifier {
     DateTime? date,
   }) {
     final expense = Expense(
+      id: id,
       description: description.trim(),
       amount: amount,
       payerId: payerId,
@@ -678,12 +806,17 @@ class MullStore extends ChangeNotifier {
     // people, so anything phrased as "your share" would be *this* phone's
     // share read out to everybody else. The group screen is one tap away and
     // knows what each person owes.
+    // The title names whoever typed it in, like an edit or a delete does. The
+    // payer is a different fact: "Sahil added Chai" when Ananya added it and
+    // said Sahil paid reads as Sahil having done something he did not.
+    final adder = group.you ?? payer;
+    final paidBy = payer.id == adder.id ? '' : ' · ${_theirNameFor(payer)} paid';
     return Notice(
       to: to,
       groupId: group.id,
       kind: NoticeKind.expenseAdded,
-      title: '${_theirNameFor(payer)} added ${expense.description}',
-      body: '${inr(expense.amount)} · ${group.isDirect ? 'with you' : group.title}',
+      title: '${_theirNameFor(adder)} added ${expense.description}',
+      body: '${inr(expense.amount)} · ${group.isDirect ? 'with you' : group.title}$paidBy',
       amount: expense.amount,
     );
   }
@@ -746,6 +879,9 @@ class MullStore extends ChangeNotifier {
     if (group.expenses.any((e) => e.id == expense.id)) return;
     group.expenses.add(expense);
     _untombstone(group, expense.id, TombstoneKind.expense);
+    // Marked unsent, so the push clears `deleted_at` if the delete already
+    // landed. See [restoreGroup].
+    group.acked.remove('e:${expense.id}');
     _commitGroup(group);
   }
 
@@ -796,6 +932,7 @@ class MullStore extends ChangeNotifier {
     if (group.recurring.any((r) => r.id == schedule.id)) return;
     group.recurring.add(schedule);
     _untombstone(group, schedule.id, TombstoneKind.recurring);
+    group.acked.remove('r:${schedule.id}');
     _commitGroup(group);
   }
 
@@ -848,8 +985,22 @@ class MullStore extends ChangeNotifier {
     DateTime? date,
   }) {
     final on = dayOf(date ?? schedule.nextDue);
+    // The same id on every phone for the same schedule and day. Every member
+    // of a flat sees the rent fall due, and a schedule set to add itself does
+    // so on each of their phones at once; with random ids that was the rent
+    // charged four times. See [stableId].
+    final id = stableId('${schedule.id}|${on.year}-${on.month}-${on.day}');
+    final already = group.expenses.where((e) => e.id == id).firstOrNull;
+    if (already != null) {
+      schedule
+        ..lastAddedOn = on
+        ..advance(now());
+      _commitGroup(group);
+      return already;
+    }
     final expense = addExpense(
       group,
+      id: id,
       description: schedule.description,
       amount: amount ?? schedule.amount,
       payerId: payerId ?? schedule.payerId,
@@ -984,8 +1135,17 @@ class MullStore extends ChangeNotifier {
     return out;
   }
 
+  /// Whether one payment may be spread across this person's ledgers.
+  ///
+  /// Not when they were matched across groups by name alone. Showing two
+  /// seats both called "Kabir" as one person is a guess worth making on
+  /// screen; writing a confirmed offset or a payment between them is not,
+  /// because if they are two people it moves money between strangers.
+  bool canSettleAcross(Standing standing) => !standing.byNameOnly || ledgersWith(standing).length <= 1;
+
   /// Whether this person has debts pointing both ways that could cancel.
   bool canNetOff(Standing standing) {
+    if (standing.byNameOnly) return false;
     final ledgers = ledgersWith(standing);
     return ledgers.any((l) => l.$2 > 0) && ledgers.any((l) => l.$2 < 0);
   }
@@ -1010,6 +1170,7 @@ class MullStore extends ChangeNotifier {
   /// money is claimed to have moved, and neither person's net position changes
   /// by a rupee. There is nothing for the other side to verify.
   List<Settlement> netOff(Standing standing) {
+    if (!canNetOff(standing)) return const [];
     final owed = [for (final l in ledgersWith(standing)) if (l.$2 > 0) l];
     final owing = [for (final l in ledgersWith(standing)) if (l.$2 < 0) (l.$1, -l.$2)];
     final written = <Settlement>[];
@@ -1094,7 +1255,7 @@ class MullStore extends ChangeNotifier {
     required int amount,
     String? utr,
   }) {
-    if (amount <= 0) return const [];
+    if (amount <= 0 || !canSettleAcross(standing)) return const [];
     netOff(standing);
 
     // Re-read: netting off has just moved every ledger.
@@ -1230,6 +1391,7 @@ class MullStore extends ChangeNotifier {
     if (group.settlements.any((s) => s.id == settlement.id)) return;
     group.settlements.add(settlement);
     _untombstone(group, settlement.id, TombstoneKind.settlement);
+    group.acked.remove('s:${settlement.id}');
     _commitGroup(group);
   }
 
@@ -1327,6 +1489,8 @@ class MullStore extends ChangeNotifier {
           // on two DateTimes written in the same breath comparing equal,
           // which is a coincidence to rely on rather than a rule.
           nudges: _longer(held?.nudges, other.nudges),
+          byNameOnly: (held?.byNameOnly ?? true) && other.userId == null &&
+              (other.email?.trim().isEmpty ?? true),
         );
       }
     }
@@ -1440,17 +1604,23 @@ class MullStore extends ChangeNotifier {
   /// that moment has been paid for. Those rows stay in the ledger and stop
   /// asking for attention.
   Set<String> settledExpenses(Group group) {
-    final events = <(DateTime, Object)>[
-      for (final e in group.expenses) (e.date, e),
+    // By day, then by the moment it was written down. An expense only carries
+    // a day once it has been through the server, so comparing it to a payment's
+    // exact time put everything added on a day before every payment that day.
+    final events = <(DateTime, DateTime, Object)>[
+      for (final e in group.expenses) (dayOf(e.date), e.createdAt, e),
       for (final s in group.settlements)
-        if (s.clearsDebt) (s.date, s),
-    ]..sort((a, b) => a.$1.compareTo(b.$1));
+        if (s.clearsDebt) (dayOf(s.date.toLocal()), s.date, s),
+    ]..sort((a, b) {
+        final byDay = a.$1.compareTo(b.$1);
+        return byDay != 0 ? byDay : a.$2.compareTo(b.$2);
+      });
 
     final net = <String, int>{};
     final seen = <String>[];
     final settled = <String>{};
 
-    for (final (_, event) in events) {
+    for (final (_, _, event) in events) {
       if (event is Expense) {
         net.update(event.payerId, (v) => v + event.amount, ifAbsent: () => event.amount);
         event.shares.forEach(
@@ -1533,11 +1703,18 @@ class MullStore extends ChangeNotifier {
   // ------------------------------------------------------------------ admin
 
   Future<void> resetAll() async {
-    profile = Profile();
+    profile = Profile(theme: profile.theme);
     groups.clear();
+    pendingGroupDeletes.clear();
     _commit();
     await flush();
   }
+
+  /// Signing out. Everything that belonged to the account goes, including
+  /// groups the server never saw and the profile — the next person to sign in
+  /// on this phone would otherwise inherit your name, and your UPI ID would go
+  /// out in *their* reminders. Only the theme is the phone's own.
+  Future<void> forgetAccount() => resetAll();
 
   /// Mirrors the design mockups. Handy for demos, screenshots and the tour.
   ///
@@ -1866,7 +2043,13 @@ class Standing {
     required this.groups,
     required this.seats,
     List<DateTime>? nudges,
+    this.byNameOnly = false,
   }) : nudges = nudges ?? [];
+
+  /// Matched across ledgers by name alone — no account, no email. A guess,
+  /// and fine for showing; see [MullStore.canSettleAcross] for what it is not
+  /// fine for.
+  final bool byNameOnly;
 
   /// One of their seats, for a name and a UPI ID. Which one is arbitrary —
   /// they are the same person, which is the premise of this class.

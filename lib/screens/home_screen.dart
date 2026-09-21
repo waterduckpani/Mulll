@@ -3,6 +3,7 @@ import 'package:flutter/cupertino.dart';
 import '../core/dates.dart';
 import '../core/money.dart';
 import '../data/models.dart';
+import '../data/remote/friends_service.dart';
 import '../data/store.dart';
 import '../ui/group_icons.dart';
 import '../ui/icons.dart';
@@ -16,6 +17,7 @@ import 'groups/group_sheets.dart';
 import 'groups/icon_picker.dart';
 import 'groups/recurring_sheets.dart';
 import 'groups/settle_up_screen.dart';
+import 'friends_sheet.dart';
 import 'people_sheet.dart';
 
 /// Mull, all of it.
@@ -81,9 +83,25 @@ class HomeScreen extends StatelessWidget {
         onTap: () => start(),
       ),
       children: empty
-          ? [_EmptyHome(onStart: start)]
+          ? [
+              // A new user's first screen is this one, and the request is how
+              // the groups they were invited to reach them.
+              _FriendRequestsCard(
+                onOpenLedger: (id) {
+                  final g = store.groupById(id);
+                  if (g != null) open(g);
+                },
+              ),
+              _EmptyHome(onStart: start),
+            ]
           : [
               const _Headline(),
+              _FriendRequestsCard(
+                onOpenLedger: (id) {
+                  final g = store.groupById(id);
+                  if (g != null) open(g);
+                },
+              ),
 
               // Anything waiting on an answer sits directly under the number,
               // because the number is not finished until these are dealt with.
@@ -201,6 +219,17 @@ class _Headline extends StatelessWidget {
               ),
             ),
           ),
+        // Said quietly, and only once a push has actually failed. A change that
+        // exists only on this phone looks exactly like one everybody can see,
+        // and the first anyone knew of the difference was "my group vanished".
+        if (store.syncTrouble && store.hasPendingChanges)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Gutter.text, 10, Gutter.text, 0),
+            child: Text(
+              "Some changes haven't synced yet. They'll go up when you're back online.",
+              style: MullType.caption(c.ink3, size: 12),
+            ),
+          ),
       ],
     );
   }
@@ -314,6 +343,94 @@ class _WaitingClaimCard extends StatelessWidget {
             'Open it',
             height: 48,
             onTap: () => showOwnClaim(context, group, settlement),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Somebody wants to split with you.
+///
+/// Being added to a group by email only puts it on your phone once you have
+/// accepted the person who added you — that acceptance is the consent, and
+/// without it anyone who knew your address could hand you a debt. Which makes
+/// the request the first thing a new user needs to see, and it used to be a
+/// count inside the profile sheet.
+class _FriendRequestsCard extends StatefulWidget {
+  const _FriendRequestsCard({required this.onOpenLedger});
+
+  final void Function(String groupId) onOpenLedger;
+
+  @override
+  State<_FriendRequestsCard> createState() => _FriendRequestsCardState();
+}
+
+class _FriendRequestsCardState extends State<_FriendRequestsCard> with WidgetsBindingObserver {
+  List<Friend> _waiting = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _load();
+  }
+
+  Future<void> _load() async {
+    final friends = await FriendsService.list();
+    if (!mounted) return;
+    setState(() => _waiting = [for (final f in friends) if (f.state == FriendState.incoming) f]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_waiting.isEmpty) return const SizedBox.shrink();
+    final c = context.c;
+    final who = _waiting.length == 1 ? _waiting.single.label.split(' ').first : '${_waiting.length} people';
+
+    return Surface(
+      lift: Lift.card,
+      radius: 28,
+      margin: const EdgeInsets.fromLTRB(Gutter.card, 10, Gutter.card, 0),
+      padding: const EdgeInsets.fromLTRB(22, 18, 16, 18),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$who ${_waiting.length == 1 ? 'wants' : 'want'} to split with you',
+                  style: ranade(16, height: 1.35, color: c.ink),
+                  maxLines: 2,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Accept to see the groups you share',
+                  style: MullType.caption(c.ink3, size: 11.5),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          InlineButton(
+            'See',
+            height: 48,
+            onTap: () async {
+              await showFriendsSheet(context, onOpenLedger: widget.onOpenLedger);
+              await _load();
+            },
           ),
         ],
       ),
@@ -890,19 +1007,22 @@ Future<void> showLedgerActions(BuildContext context, Group group) {
                   'Send summary on WhatsApp',
                   onTap: () => run(() => shareGroupSummary(context, group)),
                 ),
-                SheetAction(
-                  group.isDirect ? 'Delete this ledger' : 'Delete group',
-                  destructive: true,
-                  onTap: () => run(() {
-                    store.deleteGroup(group);
-                    Toast.show(
-                      context,
-                      'Deleted ${group.title}',
-                      action: 'Undo',
-                      onAction: () => store.restoreGroup(group),
-                    );
-                  }),
-                ),
+                // Only an admin can delete a group; the server refuses anyone
+                // else, and the group used to vanish here and come back.
+                if (group.youAreAdmin)
+                  SheetAction(
+                    group.isDirect ? 'Delete this ledger' : 'Delete group',
+                    destructive: true,
+                    onTap: () => run(() {
+                      store.deleteGroup(group);
+                      Toast.show(
+                        context,
+                        'Deleted ${group.title}',
+                        action: 'Undo',
+                        onAction: () => store.restoreGroup(group),
+                      );
+                    }),
+                  ),
               ],
             ),
           ],

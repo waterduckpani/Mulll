@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -7,6 +9,8 @@ import '../../core/split.dart';
 import '../../core/upi.dart';
 import '../../core/upi_receipt.dart';
 import '../../data/models.dart';
+import '../../data/remote/auth_service.dart';
+import '../../data/remote/friends_service.dart';
 import '../../data/remote/notices_service.dart';
 import '../../data/store.dart';
 import '../../ui/icons.dart';
@@ -213,16 +217,12 @@ class _ExpenseSheetState extends State<_ExpenseSheet> {
                   // Mull keeps whole rupees on purpose — nobody settles 33.33
                   // over UPI — but rounding somebody's 499.50 up without a
                   // word is the app changing a number they typed.
-                  help: _rounded == null
-                      ? null
-                      : Text('Rounded to ${inr(_rounded!)}. Mull keeps whole rupees.'),
+                  help: _rounded == null ? null : Text('Rounded to ${inr(_rounded!)}. Mull keeps whole rupees.'),
                 ),
                 const SizedBox(height: 18),
                 _RowButton(
                   label: 'When',
-                  value: daysBetween(_date, store.now()) == 0
-                      ? 'Today'
-                      : shortDateWithYear(_date, store.now()),
+                  value: daysBetween(_date, store.now()) == 0 ? 'Today' : shortDateWithYear(_date, store.now()),
                   onTap: _pickDate,
                 ),
                 const SizedBox(height: 26),
@@ -292,7 +292,9 @@ class _RowButton extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Expanded(child: Text(label, style: ranade(15, color: c.ink2))),
+            Expanded(
+              child: Text(label, style: ranade(15, color: c.ink2)),
+            ),
             Text(value, style: excon(16, color: c.ink)),
             const SizedBox(width: 8),
             MullIcon(MullGlyph.chevronRight, size: 15, color: c.ink3, strokeWidth: 1.7),
@@ -314,8 +316,7 @@ class _FrequencyPicker extends StatelessWidget {
     spacing: 8,
     runSpacing: 8,
     children: [
-      for (final f in Frequency.values)
-        NameChip(f.label, selected: f == value, onTap: () => onChanged(f)),
+      for (final f in Frequency.values) NameChip(f.label, selected: f == value, onTap: () => onChanged(f)),
     ],
   );
 }
@@ -340,8 +341,7 @@ class _SettleSheet extends StatefulWidget {
 }
 
 class _SettleSheetState extends State<_SettleSheet> {
-  late final AmountController _amount = AmountController(widget.transfer.amount)
-    ..addListener(() => setState(() {}));
+  late final AmountController _amount = AmountController(widget.transfer.amount)..addListener(() => setState(() {}));
 
   @override
   void dispose() {
@@ -390,7 +390,14 @@ class _SettleSheetState extends State<_SettleSheet> {
       );
       if (!context.mounted) return;
       if (!opened) {
-        Toast.show(context, 'No UPI app could open that');
+        Toast.show(
+          context,
+          'No UPI app could open that',
+          // Some UPI apps refuse a payment link they did not start themselves.
+          // Pasting the ID into one by hand always works.
+          action: 'Copy ID',
+          onAction: () => Clipboard.setData(ClipboardData(text: upi)),
+        );
         return;
       }
       // We cannot know whether the payment went through — only the user can
@@ -437,8 +444,7 @@ class _SettleSheetState extends State<_SettleSheet> {
           Text(
             switch (null) {
               _ when _value == null => 'How much is actually changing hands.',
-              _ when _value! > _max =>
-                'That is more than the ${inr(_max)} outstanding here.',
+              _ when _value! > _max => 'That is more than the ${inr(_max)} outstanding here.',
               _ when part => '${inr(_max - _value!)} would still be open.',
               _ when youPay => 'To ${to.name}${payee.upiId == null ? '' : ' · ${payee.upiId}'}',
               // Money coming to you is the case the old copy got wrong: it is
@@ -872,9 +878,7 @@ Future<void> remindMember(
     if (!context.mounted) return;
     Toast.show(
       context,
-      sent
-          ? '${store.shortName(member)} is not on Mull — sent on WhatsApp'
-          : "Couldn't open WhatsApp",
+      sent ? '${store.shortName(member)} is not on Mull — sent on WhatsApp' : "Couldn't open WhatsApp",
     );
     return;
   }
@@ -945,12 +949,30 @@ class _MemberSheetState extends State<_MemberSheet> {
 
   void _save() {
     final store = context.readStore;
+    final member = widget.member;
     final name = _name.text.trim();
-    if (name.isNotEmpty) widget.member.name = name;
+    if (member.isYou) {
+      // Your seat's name is your account's name — the pull takes it from the
+      // profile, so changing only the seat snapped back twenty seconds later.
+      if (name.isNotEmpty && name != store.profile.name) {
+        store.updateProfile((p) => p.name = name);
+        unawaited(AuthService.saveProfile(name: name));
+      }
+    } else if (name.isNotEmpty) {
+      member.name = name;
+    }
     final email = _email.text.trim().toLowerCase();
-    widget.member.email = email.isEmpty ? null : email;
-    store.setPhone(widget.member, _phone.text);
-    store.setUpiId(widget.member, _upi.text);
+    final before = member.email;
+    member.email = email.isEmpty ? null : email;
+    // A seat is claimed by its address only into a group where the person has
+    // accepted somebody as a friend. Asking them is what makes the address
+    // mean anything, and it is them saying yes — not you typing it — that
+    // puts this group's balances on their phone.
+    if (!member.isLinked && email.isNotEmpty && email != before) {
+      unawaited(FriendsService.request(email));
+    }
+    store.setPhone(member, _phone.text);
+    store.setUpiId(member, _upi.text);
     HapticFeedback.mediumImpact();
     Navigator.of(context).pop();
   }
@@ -983,8 +1005,8 @@ class _MemberSheetState extends State<_MemberSheet> {
                     help: Text(
                       widget.member.isLinked
                           ? 'They are on Mull and see this group.'
-                          : 'Invite them here and this seat becomes theirs the moment they '
-                                'sign up, with everything they already owe or are owed.',
+                          : 'They get a friend request. Once they accept it, this seat '
+                                'is theirs, with everything they already owe or are owed.',
                       style: ranade(12, height: 1.5, color: c.ink3),
                     ),
                   ),
@@ -1014,7 +1036,9 @@ class _MemberSheetState extends State<_MemberSheet> {
                         height: 58,
                         child: Row(
                           children: [
-                            Expanded(child: Text('Their UPI ID', style: ranade(15.5, color: c.ink))),
+                            Expanded(
+                              child: Text('Their UPI ID', style: ranade(15.5, color: c.ink)),
+                            ),
                             Text(widget.member.upiId ?? 'Not set', style: excon(15, color: c.ink2)),
                           ],
                         ),
@@ -1131,8 +1155,7 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
                 // this is not "remove it from my phone". A group deleted here
                 // disappears for everyone in it, including the history they
                 // were relying on.
-                if (group.members.length > 1)
-                  'It goes for everyone in it, not just you.',
+                if (group.members.length > 1) 'It goes for everyone in it, not just you.',
                 if (!group.isSettled) 'This one is not settled up yet.',
               ].join(' '),
               style: ranade(14, height: 1.6, color: sheet.c.ink3),
@@ -1270,7 +1293,6 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
     );
   }
 }
-
 
 // ----------------------------------------------------------- expense actions
 

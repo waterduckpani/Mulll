@@ -1,9 +1,8 @@
 /// Mull's connection to Supabase.
 ///
 /// Deliberately optional. The app is local-first and has to keep working with
-/// no project configured, no network and no account — the wishlist, the budget
-/// and the lists are private to one phone and never leave it. Only groups sync,
-/// because only groups are other people.
+/// no project configured and no network: everything applies to `mull.json`
+/// first and syncs afterwards.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -41,7 +40,7 @@ class Backend {
   ///
   /// Never throws: a backend that cannot be reached must not stop Mull from
   /// opening. Someone on a train with a dead connection still gets their
-  /// wishlist.
+  /// ledgers.
   static Future<void> init() async {
     if (_ready || !BackendConfig.isConfigured) return;
     try {

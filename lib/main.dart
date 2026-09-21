@@ -60,8 +60,10 @@ class MullApp extends StatelessWidget {
             return AnnotatedRegion<SystemUiOverlayStyle>(
               value: dark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
               child: MediaQuery(
-                // Respect Dynamic Type, within what the layout can hold.
-                data: mq.copyWith(textScaler: mq.textScaler.clamp(minScaleFactor: .9, maxScaleFactor: 1.25)),
+                // Respect Dynamic Type, within what the layout can hold. The
+                // ceiling was 1.25, which quietly ignored the larger text sizes
+                // the people who most need them turn on.
+                data: mq.copyWith(textScaler: mq.textScaler.clamp(minScaleFactor: .9, maxScaleFactor: 1.5)),
                 child: child!,
               ),
             );

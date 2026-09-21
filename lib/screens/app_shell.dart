@@ -37,7 +37,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _announceAutoAdded();
+      unawaited(_announceAutoAdded());
       _drainInbox();
     });
   }
@@ -91,7 +91,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       // Whatever arrived while the socket was suspended is in the inbox but
       // not in memory, and the badge is what tells anyone to go and look.
       unawaited(_inbox?.refresh());
-      _announceAutoAdded();
+      unawaited(_announceAutoAdded());
       // Receipts are shared while Mull is backgrounded — you pay in GPay, then
       // come back here — so resuming is the common case, not launching.
       _drainInbox();
@@ -102,18 +102,34 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   /// A schedule set to add itself has just done so. Saying nothing would make
   /// it an expense nobody checked, which is the one thing recurring must not be.
-  void _announceAutoAdded() {
+  ///
+  /// After a pull, not before. Straight after launch this phone's copy of a
+  /// schedule can be a day stale — a flatmate's phone already added this
+  /// month's rent and moved it on — and running against it added the rent a
+  /// second time. The occurrence ids are shared across phones as well (see
+  /// [MullStore.addDue]), so a race that slips through lands on one row; this
+  /// keeps it from being attempted in the first place.
+  bool _addingDue = false;
+
+  Future<void> _announceAutoAdded() async {
     final store = _store;
-    if (store == null) return;
-    final made = store.runAutoRecurring();
-    if (made.isEmpty || !mounted) return;
-    final total = made.fold(0, (s, m) => s + m.$2.amount);
-    Toast.show(
-      context,
-      made.length == 1
-          ? 'Added ${made.first.$2.description} · ${inr(made.first.$2.amount)}'
-          : 'Added ${made.length} repeating expenses · ${inr(total)}',
-    );
+    if (store == null || _addingDue) return;
+    _addingDue = true;
+    try {
+      await store.pullNow().timeout(const Duration(seconds: 8), onTimeout: () {});
+      if (!mounted) return;
+      final made = store.runAutoRecurring();
+      if (made.isEmpty || !mounted) return;
+      final total = made.fold(0, (s, m) => s + m.$2.amount);
+      Toast.show(
+        context,
+        made.length == 1
+            ? 'Added ${made.first.$2.description} · ${inr(made.first.$2.amount)}'
+            : 'Added ${made.length} repeating expenses · ${inr(total)}',
+      );
+    } finally {
+      _addingDue = false;
+    }
   }
 
   /// Takes in whatever was shared into Mull from other apps.

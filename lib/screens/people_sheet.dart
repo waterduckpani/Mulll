@@ -125,7 +125,16 @@ class _PersonSheet extends StatelessWidget {
         // than at the end of the list. With a net-off card on screen the
         // button was under the fold, which turns the one action worth having
         // here into something you have to go looking for.
-        if (!standing.isSquare)
+        if (!standing.isSquare && !store.canSettleAcross(standing))
+          Padding(
+            padding: const EdgeInsets.fromLTRB(30, 4, 30, 30),
+            child: Text(
+              'Mull is matching these by name only, so they may not be the same '
+              '$name. Settle in each ledger, so the money goes to the right one.',
+              style: MullType.caption(c.ink3),
+            ),
+          )
+        else if (!standing.isSquare)
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 4, 20, 26),
             child: Column(
@@ -258,14 +267,22 @@ class _RemindButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = context.store;
-    final ready = store.canNudge(standing);
-    return Opacity(
-      opacity: ready ? 1 : .4,
-      child: SecondaryButton(
-        ready ? 'Remind ${store.shortName(standing.member)}' : 'Reminded twice today already',
-        onTap: ready ? () => nudgePerson(context, standing) : null,
-      ),
-    );
+    final name = store.shortName(standing.member);
+    if (!store.canNudge(standing)) {
+      // Said, not greyed out. Faded on top of a disabled button's own fade,
+      // the one sentence explaining why there was no button came out at about
+      // an eighth of full strength — unreadable, and against the rule that
+      // nothing recedes by going translucent.
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        child: Text(
+          "You've reminded $name twice today. You can again tomorrow.",
+          textAlign: TextAlign.center,
+          style: MullType.caption(context.c.ink3),
+        ),
+      );
+    }
+    return SecondaryButton('Remind $name', onTap: () => nudgePerson(context, standing));
   }
 }
 
@@ -358,7 +375,14 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
     );
     if (!mounted) return;
     if (!opened) {
-      Toast.show(context, 'No UPI app could open that');
+      Toast.show(
+        context,
+        'No UPI app could open that',
+        // Some UPI apps refuse a payment link they did not start themselves.
+        // Pasting the ID into one by hand always works.
+        action: 'Copy ID',
+        onAction: () => Clipboard.setData(ClipboardData(text: upi)),
+      );
       return;
     }
     // Mull cannot see the UPI app, so the only honest thing is to ask.
@@ -426,9 +450,17 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
               if (standing.groups.length > 1) ...[
                 const SizedBox(height: 22),
                 Text(
-                  'Spread across ${standing.groups.length} ledgers, biggest '
-                  'first, so whole ones close rather than every one of them '
-                  'being left slightly short.',
+                  [
+                    // Recording this nets off first, which writes both ledgers
+                    // up. That is the only way the netted figure above can be
+                    // cleared, and it should not happen without being said.
+                    if (store.canNetOff(standing))
+                      'This also cancels the ${inr(store.netOffAmount(standing))} that '
+                          'goes both ways between you, in both ledgers.',
+                    'Spread across ${standing.groups.length} ledgers, biggest '
+                        'first, so whole ones close rather than every one of them '
+                        'being left slightly short.',
+                  ].join(' '),
                   style: MullType.caption(c.ink3),
                 ),
               ],

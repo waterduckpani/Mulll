@@ -245,10 +245,26 @@ class GroupDetailScreen extends StatelessWidget {
           ],
         ),
 
+        // The last thing that happened, in one line. What changed since you
+        // last looked is the most common question anyone opens a group with,
+        // and it was two taps away in the ledger. A line rather than a list,
+        // because this screen has no height to spare (see the icon above).
+        if (store.activity(group).firstOrNull case final latest?)
+          Footnote(
+            switch (latest) {
+              Expense e =>
+                'Latest: ${e.description}, ${inr(e.amount)}, ${daysAgo(e.date, store.now())}',
+              Settlement s =>
+                'Latest: ${group.memberById(s.fromId) == null ? 'Someone' : store.shortName(group.memberById(s.fromId)!)} '
+                    '${s.offset ? 'netted off' : 'paid'} ${inr(s.amount)}, ${daysAgo(s.date, store.now())}',
+              _ => '',
+            },
+            padding: const EdgeInsets.fromLTRB(Gutter.text, 26, Gutter.text, 0),
+          ),
         if (group.expenses.isNotEmpty)
           Footnote(
             '${inr(group.total)} spent between ${group.members.length} people',
-            padding: const EdgeInsets.fromLTRB(Gutter.text, 26, Gutter.text, 0),
+            padding: const EdgeInsets.fromLTRB(Gutter.text, 8, Gutter.text, 0),
           ),
       ],
     );

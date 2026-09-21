@@ -29,8 +29,7 @@ class RecurringScreen extends StatelessWidget {
     if (group == null) return const SizedBox.shrink();
 
     final now = store.now();
-    final active = [...group.recurring.where((r) => r.isActive)]
-      ..sort((a, b) => a.nextDue.compareTo(b.nextDue));
+    final active = [...group.recurring.where((r) => r.isActive)]..sort((a, b) => a.nextDue.compareTo(b.nextDue));
     final resting = group.recurring.where((r) => !r.isActive).toList();
     final next = active.firstOrNull;
 
@@ -244,8 +243,7 @@ class _ScheduleCard extends StatelessWidget {
 
     // "1st" reads better than "every month" under an EVERY MONTH heading.
     final cadence = switch (schedule.frequency) {
-      Frequency.monthly || Frequency.quarterly || Frequency.yearly =>
-        ordinal(schedule.nextDue.day),
+      Frequency.monthly || Frequency.quarterly || Frequency.yearly => ordinal(schedule.nextDue.day),
       _ => shortDate(schedule.nextDue),
     };
 
@@ -256,49 +254,49 @@ class _ScheduleCard extends StatelessWidget {
       scale: .985,
       semanticLabel: '${schedule.description}, ${inr(schedule.amount)}',
       child: ExcludeSemantics(
-        child: Opacity(
-          opacity: quiet ? .55 : 1,
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(24, 20, 24, 22),
-            decoration: surfaceOf(
-              c,
-              quiet ? Lift.flat : Lift.card,
-              radius: BorderRadius.circular(26),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        schedule.description,
-                        style: MullType.cardTitle(quiet ? c.ink2 : c.ink, size: 18),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+        // A paused or finished schedule steps back by sitting flat, not by
+        // going translucent — at 55% its caption fell to about 2.6:1 against
+        // the screen, which is the exact thing the design rules out.
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 22),
+          decoration: surfaceOf(
+            c,
+            quiet ? Lift.flat : Lift.card,
+            radius: BorderRadius.circular(26),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Expanded(
+                    child: Text(
+                      schedule.description,
+                      style: MullType.cardTitle(quiet ? c.ink2 : c.ink, size: 18),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    const SizedBox(width: 10),
-                    Text(inr(schedule.amount), style: MullType.cardAmount(c.ink)),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  [
-                    if (schedule.paused) 'Paused' else if (schedule.hasEnded) 'Finished' else cadence,
-                    'split ${schedule.shares.length} ways',
-                    if (payer != null && !payer.isYou) '${store.shortName(payer)} pays',
-                    if (schedule.autoAdd) 'adds itself',
-                    if (last != null) '${monthLabel(last, store.now())} added',
-                  ].join(' · '),
-                  style: MullType.caption(c.ink3, size: 11.5),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(inr(schedule.amount), style: MullType.cardAmount(c.ink)),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                [
+                  if (schedule.paused) 'Paused' else if (schedule.hasEnded) 'Finished' else cadence,
+                  'split ${schedule.shares.length} ways',
+                  if (payer != null && !payer.isYou) '${store.shortName(payer)} pays',
+                  if (schedule.autoAdd) 'adds itself',
+                  if (last != null) '${monthLabel(last, store.now())} added',
+                ].join(' · '),
+                style: MullType.caption(c.ink3, size: 11.5),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
           ),
         ),
       ),

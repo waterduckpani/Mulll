@@ -726,7 +726,11 @@ void main() {
       store.completeOnboarding(name: 'Bharat');
 
       // Ananya paid for the villa: you owe her 2,000 here.
+      // The same person in both, by address — which is what lets money be
+      // written between her ledgers. Two seats that share only a name are a
+      // guess; see 'a name alone is not enough to move money on' below.
       goa = store.addGroup('Goa', ['Ananya']);
+      goa.members.firstWhere((m) => !m.isYou).email = 'ananya@example.com';
       final meA = goa.you!.id;
       final herA = goa.members.firstWhere((m) => !m.isYou).id;
       store.addExpense(
@@ -739,6 +743,7 @@ void main() {
 
       // You paid the rent: she owes you 3,000 here.
       flat = store.addGroup('Flat', ['Ananya']);
+      flat.members.firstWhere((m) => !m.isYou).email = 'ananya@example.com';
       final meB = flat.you!.id;
       final herB = flat.members.firstWhere((m) => !m.isYou).id;
       store.addExpense(
@@ -851,6 +856,23 @@ void main() {
         isTrue,
         reason: 'an offset must never be recorded as a payment somebody made',
       );
+    });
+
+    test('a name alone is not enough to move money on', () {
+      // Two seats both typed "Ananya" are shown as one person, which is right
+      // more often than not. Writing confirmed offsets between them is not
+      // something to do on a guess: if they are two people, it moves money
+      // between strangers.
+      for (final g in [goa, flat]) {
+        g.members.firstWhere((m) => !m.isYou).email = null;
+      }
+      expect(ananya().byNameOnly, isTrue);
+      expect(ananya().amount, 1000, reason: 'still shown netted');
+      expect(store.canNetOff(ananya()), isFalse);
+      expect(store.canSettleAcross(ananya()), isFalse);
+      expect(store.netOff(ananya()), isEmpty);
+      expect(store.settleAcross(ananya(), amount: 1000), isEmpty);
+      expect(goa.settlements, isEmpty);
     });
 
     test('netting off is idempotent', () {
@@ -1431,7 +1453,7 @@ void main() {
       expect(uri.queryParameters, {
         'pa': 'sahil@okaxis',
         'pn': 'Sahil Mehta',
-        'am': '1240',
+        'am': '1240.00',
         'cu': 'INR',
         'tn': 'Goa trip',
       });
@@ -1591,7 +1613,9 @@ void main() {
       expect(notice.kind, NoticeKind.expenseAdded);
       expect(notice.to, unorderedEquals(['u-sahil', 'u-dev']),
           reason: 'Bhavya is in the group and not in the split');
-      expect(notice.title, contains('Sahil'));
+      expect(notice.title, 'Ananya added Chai',
+          reason: 'Ananya typed it in; Sahil only paid');
+      expect(notice.body, endsWith('Sahil paid'));
     });
 
     test('a seat with nobody behind it is not told anything', () {

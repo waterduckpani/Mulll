@@ -88,7 +88,39 @@ class NoticesInbox extends ChangeNotifier {
           notifyListeners();
         },
       )
-      ..subscribe();
+      ..subscribe((status, error) {
+        switch (status) {
+          case RealtimeSubscribeStatus.subscribed:
+            _retries = 0;
+            // Whatever landed while the socket was down came through nothing.
+            unawaited(refresh());
+          case RealtimeSubscribeStatus.channelError:
+          case RealtimeSubscribeStatus.timedOut:
+          case RealtimeSubscribeStatus.closed:
+            _rebuild();
+        }
+      });
+  }
+
+  /// The same repair [GroupsSync] makes, for the same reason: a socket
+  /// authenticates once, the token lasts an hour, and a subscribe that failed
+  /// on an expired one was never tried again — so live banners stopped for the
+  /// rest of the session and nothing said so.
+  int _retries = 0;
+  bool _stopping = false;
+  Timer? _reconnect;
+
+  void _rebuild() {
+    if (_stopping || !Backend.isSignedIn) return;
+    final channel = _channel;
+    _channel = null;
+    if (channel != null) unawaited(Backend.client.removeChannel(channel));
+    final wait = Duration(seconds: [2, 5, 15, 30, 60][_retries.clamp(0, 4)]);
+    _retries++;
+    _reconnect?.cancel();
+    _reconnect = Timer(wait, () {
+      if (Backend.isSignedIn && _channel == null) _listen();
+    });
   }
 
   /// Called when the inbox is opened. Marks what is on screen as seen — both
@@ -117,9 +149,14 @@ class NoticesInbox extends ChangeNotifier {
   }
 
   Future<void> _stop() async {
+    _stopping = true;
+    _reconnect?.cancel();
+    _reconnect = null;
+    _retries = 0;
     final channel = _channel;
     _channel = null;
     if (channel != null) await Backend.client.removeChannel(channel);
+    _stopping = false;
   }
 
   @override

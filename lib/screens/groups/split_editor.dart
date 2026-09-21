@@ -32,22 +32,65 @@ class SplitModel extends ChangeNotifier {
   }) : payerId = payerId ?? group.you?.id ?? group.members.first.id,
        _method = method,
        _amount = amount,
+       _original = shares == null ? null : Map.of(shares),
+       _originalAmount = amount,
        included = shares == null
            ? group.members.map((m) => m.id).toSet()
            : shares.keys.toSet() {
+    final ratios = shares == null ? const <String, int>{} : _ratiosOf(shares);
+    final percents = shares == null || amount <= 0 ? const <String, int>{} : _percentsOf(shares, amount);
     for (final m in group.members) {
       final share = shares?[m.id];
       weights[m.id] = TextEditingController(
         text: switch (method) {
           SplitMethod.exact => share?.toString() ?? '',
-          SplitMethod.shares => share == null ? '' : '1',
-          SplitMethod.percent => share == null || amount <= 0
-              ? ''
-              : (share * 100 / amount).round().toString(),
+          SplitMethod.shares => ratios[m.id]?.toString() ?? '',
+          SplitMethod.percent => percents[m.id]?.toString() ?? '',
           SplitMethod.equal => '',
         },
-      )..addListener(notifyListeners);
+      )..addListener(_edited);
     }
+  }
+
+  /// The split as it was saved, for an expense being edited.
+  ///
+  /// Only rupee amounts are stored, so the fields above are a reconstruction
+  /// of how they were made — and a reconstruction can round. Until somebody
+  /// actually changes the split, it is the saved amounts that go back, not a
+  /// re-derivation: editing the description of a 2:1 dinner used to reopen it
+  /// as 1:1, and saving moved the money.
+  final Map<String, int>? _original;
+  final int _originalAmount;
+  bool _touched = false;
+
+  void _edited() {
+    _touched = true;
+    notifyListeners();
+  }
+
+  /// "By shares" in the smallest whole numbers that give these amounts —
+  /// 2,000 and 1,000 read back as 2 and 1, not 1 and 1.
+  static Map<String, int> _ratiosOf(Map<String, int> shares) {
+    int gcd(int a, int b) => b == 0 ? a : gcd(b, a % b);
+    final divisor = shares.values.where((v) => v > 0).fold(0, gcd);
+    if (divisor == 0) return const {};
+    return {for (final e in shares.entries) if (e.value > 0) e.key: e.value ~/ divisor};
+  }
+
+  /// Whole percentages that add up to exactly 100, largest remainder first.
+  /// Rounding each on its own made a three-way split 33 + 33 + 33, which the
+  /// percent check then refused, so the expense could not be saved unedited.
+  static Map<String, int> _percentsOf(Map<String, int> shares, int amount) {
+    final exact = {for (final e in shares.entries) e.key: e.value * 100 / amount};
+    final out = {for (final e in exact.entries) e.key: e.value.floor()};
+    final left = 100 - out.values.fold(0, (s, v) => s + v);
+    final byRemainder = exact.keys.toList()
+      ..sort((a, b) => (exact[b]! - out[b]!).compareTo(exact[a]! - out[a]!));
+    for (var i = 0; i < left && byRemainder.isNotEmpty; i++) {
+      final id = byRemainder[i % byRemainder.length];
+      out[id] = out[id]! + 1;
+    }
+    return out;
   }
 
   final Group group;
@@ -72,6 +115,7 @@ class SplitModel extends ChangeNotifier {
   /// back in, which is the precise opposite of what the tick had just said.
   set method(SplitMethod value) {
     if (_method == value) return;
+    _touched = true;
     final wasEqual = _method == SplitMethod.equal;
     _method = value;
 
@@ -107,6 +151,7 @@ class SplitModel extends ChangeNotifier {
 
   void toggle(String id) {
     if (!included.remove(id)) included.add(id);
+    _touched = true;
     notifyListeners();
   }
 
@@ -119,6 +164,8 @@ class SplitModel extends ChangeNotifier {
   /// The split as it currently stands, or an empty map if it does not resolve.
   Map<String, int> get shares {
     if (_amount <= 0) return const {};
+    final original = _original;
+    if (original != null && !_touched && _amount == _originalAmount) return Map.of(original);
 
     switch (_method) {
       case SplitMethod.equal:

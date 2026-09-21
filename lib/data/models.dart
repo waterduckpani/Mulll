@@ -22,7 +22,46 @@ String newId() {
       '-${hex.substring(16, 20)}-${hex.substring(20)}';
 }
 
+/// The same uuid for the same [seed], on every phone.
+///
+/// For rows that more than one phone can decide to create at once. A schedule
+/// coming due is the case that matters: every flatmate's phone sees rent fall
+/// due on the 1st, and with random ids each one posted its own copy and the
+/// rent was charged twice. Derived from the schedule and the day instead, the
+/// copies are one row as far as Postgres is concerned and the second upsert
+/// simply lands on the first.
+///
+/// Four 32-bit FNV-1a passes with different offsets make the 128 bits —
+/// 32-bit so the arithmetic never leaves a Dart int's positive range. Not
+/// cryptographic and it does not need to be: the seeds are ids this app
+/// generated, and a collision needs two of them to hash alike.
+String stableId(String seed) {
+  String fnv(int basis) {
+    var h = basis;
+    for (final unit in seed.codeUnits) {
+      h = ((h ^ unit) * 0x01000193) & 0xFFFFFFFF;
+    }
+    return h.toRadixString(16).padLeft(8, '0');
+  }
+
+  final hex = [0x811c9dc5, 0x050c5d1f, 0x6c62272e, 0x2d358dcc].map(fnv).join().split('');
+  hex[12] = '5'; // version 5, "name-based"
+  hex[16] = '89ab'[int.parse(hex[16], radix: 16) & 3]; // variant 1
+  final h = hex.join();
+  return '${h.substring(0, 8)}-${h.substring(8, 12)}-${h.substring(12, 16)}'
+      '-${h.substring(16, 20)}-${h.substring(20)}';
+}
+
 DateTime? _date(Object? v) => v == null ? null : DateTime.parse(v as String);
+
+String _day(DateTime? d) => d == null
+    ? ''
+    : '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-'
+          '${d.day.toString().padLeft(2, '0')}';
+
+/// Map entries in a fixed order, so two equal maps print the same.
+List<List<Object>> _sorted(Map<String, int> m) =>
+    [for (final k in m.keys.toList()..sort()) [k, m[k]!]];
 
 /// How an expense was divided.
 ///
@@ -105,6 +144,12 @@ class Member {
     return (parts.first[0] + parts.last[0]).toUpperCase();
   }
 
+  /// See [Group.acked]. A linked seat's VPA is the account's, never the
+  /// seat's, so it is not part of what this phone could have changed.
+  String get syncPrint => [
+    name, email, phone, userId, isLinked ? null : upiId, role.name,
+  ].toString();
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
@@ -149,12 +194,22 @@ class Expense {
     this.recurringId,
     this.note,
     DateTime? date,
+    DateTime? createdAt,
   }) : id = id ?? newId(),
-       date = date ?? DateTime.now();
+       date = date ?? DateTime.now(),
+       createdAt = createdAt ?? date ?? DateTime.now();
 
   final String id;
   String description;
   int amount;
+
+  /// When it was written down, as opposed to [date], the day it happened.
+  ///
+  /// The server keeps [date] as a day with no time in it, so after a pull an
+  /// expense added at 3pm and a payment made at 10am the same morning could
+  /// not be told apart by date — and the replay that decides which expenses a
+  /// payment already cleared put the expense first. This breaks the tie.
+  final DateTime createdAt;
 
   /// Who actually put the money down.
   String payerId;
@@ -191,7 +246,14 @@ class Expense {
     'recurringId': recurringId,
     'note': note,
     'date': date.toIso8601String(),
+    'createdAt': createdAt.toIso8601String(),
   };
+
+  /// What the server holds for this row, in a form two copies can be compared
+  /// by. Only fields that sync; see [Group.acked].
+  String get syncPrint => [
+    description, amount, payerId, _sorted(shares), method.name, recurringId, note, _day(date),
+  ].toString();
 
   factory Expense.fromJson(Map<String, dynamic> j) => Expense(
     id: j['id'] as String,
@@ -203,6 +265,7 @@ class Expense {
     recurringId: j['recurringId'] as String?,
     note: j['note'] as String?,
     date: _date(j['date']),
+    createdAt: _date(j['createdAt']),
   );
 }
 
@@ -310,6 +373,12 @@ class Recurring {
     nextDue = next;
   }
 
+  /// See [Group.acked].
+  String get syncPrint => [
+    description, amount, payerId, _sorted(shares), method.name, frequency.name,
+    _day(nextDue), _day(endsOn), paused, autoAdd, _day(lastAddedOn),
+  ].toString();
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'description': description,
@@ -393,6 +462,12 @@ class Settlement {
   /// Only a confirmed payment moves a balance.
   bool get clearsDebt => status == SettlementStatus.confirmed;
 
+  /// See [Group.acked]. The claim time never changes after insert, so only
+  /// what can: the status, and what the claimer may still correct.
+  String get syncPrint => [
+    fromId, toId, amount, status.name, utr, offset, confirmedAt != null,
+  ].toString();
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'fromId': fromId,
@@ -465,6 +540,7 @@ class Group {
     List<Settlement>? settlements,
     List<Recurring>? recurring,
     List<Tombstone>? tombstones,
+    Map<String, String>? acked,
     DateTime? createdAt,
     this.syncedAt,
   }) : id = id ?? newId(),
@@ -473,6 +549,7 @@ class Group {
        settlements = settlements ?? [],
        recurring = recurring ?? [],
        tombstones = tombstones ?? [],
+       acked = acked ?? {},
        createdAt = createdAt ?? DateTime.now();
 
   final String id;
@@ -508,6 +585,40 @@ class Group {
   DateTime? syncedAt;
 
   bool get hasReachedServer => syncedAt != null;
+
+  /// What the server last had for each row, keyed by [printed]'s keys.
+  ///
+  /// This is what lets a push send only what changed and a pull keep what has
+  /// not been sent yet. Both used to work on the whole group, and both lost
+  /// data doing it: a push re-sent every row from this phone's copy, so an
+  /// edit someone else made twenty seconds ago was overwritten by whoever
+  /// pushed next; and a pull replaced every row with the server's, so an edit
+  /// whose push had failed was erased from the phone that made it.
+  ///
+  /// A row whose print differs from its entry here has been changed on this
+  /// phone and not yet accepted. A row with no entry has never been accepted.
+  final Map<String, String> acked;
+
+  /// Every syncing row of this group and its current print.
+  Map<String, String> get printed => {
+    'g': groupPrint,
+    for (final m in members) 'm:${m.id}': m.syncPrint,
+    for (final e in expenses) 'e:${e.id}': e.syncPrint,
+    for (final r in recurring) 'r:${r.id}': r.syncPrint,
+    for (final s in settlements) 's:${s.id}': s.syncPrint,
+  };
+
+  String get groupPrint => [name, icon].toString();
+
+  /// Changed on this phone and not yet on the server.
+  bool isDirty(String key, String print) => acked[key] != print;
+
+  /// Anything at all still waiting to go up — for retrying, and for warning
+  /// someone before they sign out and lose it.
+  bool get hasPendingChanges =>
+      !hasReachedServer ||
+      tombstones.isNotEmpty ||
+      printed.entries.any((e) => isDirty(e.key, e.value));
 
   bool get isDirect => kind == GroupKind.direct;
 
@@ -628,6 +739,7 @@ class Group {
     'settlements': settlements.map((s) => s.toJson()).toList(),
     'recurring': recurring.map((r) => r.toJson()).toList(),
     'tombstones': tombstones.map((t) => t.toJson()).toList(),
+    'acked': acked,
     'createdAt': createdAt.toIso8601String(),
     'syncedAt': syncedAt?.toIso8601String(),
   };
@@ -642,6 +754,7 @@ class Group {
     settlements: (j['settlements'] as List? ?? []).map((s) => Settlement.fromJson((s as Map).cast())).toList(),
     recurring: (j['recurring'] as List? ?? []).map((r) => Recurring.fromJson((r as Map).cast())).toList(),
     tombstones: (j['tombstones'] as List? ?? []).map((t) => Tombstone.fromJson((t as Map).cast())).toList(),
+    acked: (j['acked'] as Map?)?.cast<String, String>(),
     createdAt: _date(j['createdAt']),
     syncedAt: _date(j['syncedAt']),
   );
