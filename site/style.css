@@ -1,0 +1,42 @@
+/* Mull's pages: the app's rules, on the web. Monochrome, no colour carrying
+   meaning, dark first. */
+:root {
+  --screen: #f4f3ef; --ink: #121212; --ink2: #3a3a38; --ink3: #6b6a66; --rule: #dedcd5; --card: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --screen: #0e0e0d; --ink: #f2f1ec; --ink2: #c9c8c2; --ink3: #8f8e88; --rule: #2a2a28; --card: #171716; }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--screen); color: var(--ink2);
+  font: 17px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+}
+main { max-width: 680px; margin: 0 auto; padding: 56px 20px 96px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 48px; }
+.mark { font-weight: 600; font-size: 28px; letter-spacing: -.02em; color: var(--ink); text-decoration: none; }
+nav a { color: var(--ink3); text-decoration: none; margin-left: 18px; font-size: 15px; }
+nav a:hover, nav a[aria-current] { color: var(--ink); }
+h1 { color: var(--ink); font-size: 40px; line-height: 1.1; letter-spacing: -.025em; margin: 0 0 12px; font-weight: 600; }
+.updated { color: var(--ink3); font-size: 14px; margin: 0 0 40px; }
+.lede { font-size: 20px; color: var(--ink); margin: 0 0 40px; }
+h2 { color: var(--ink); font-size: 22px; letter-spacing: -.01em; margin: 48px 0 12px; font-weight: 600; }
+h3 { color: var(--ink); font-size: 17px; margin: 28px 0 6px; font-weight: 600; }
+p, ul { margin: 0 0 16px; }
+ul { padding-left: 20px; }
+li { margin-bottom: 6px; }
+strong { color: var(--ink); font-weight: 600; }
+a { color: var(--ink); }
+.card { background: var(--card); border-radius: 18px; padding: 22px 24px; margin: 24px 0; }
+.card p:last-child, .card ul:last-child { margin-bottom: 0; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0 20px; font-size: 15px; }
+th, td { text-align: left; padding: 10px 8px 10px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { color: var(--ink); font-weight: 600; }
+footer { margin-top: 72px; padding-top: 20px; border-top: 1px solid var(--rule); color: var(--ink3); font-size: 14px; }
+@media (max-width: 480px) {
+  main { padding-top: 32px; }
+  h1 { font-size: 32px; }
+  header { flex-direction: column; gap: 8px; }
+  nav a { margin: 0 18px 0 0; }
+  table { font-size: 14px; }
+}

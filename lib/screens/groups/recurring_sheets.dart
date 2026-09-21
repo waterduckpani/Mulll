@@ -165,7 +165,7 @@ class _DueSheetState extends State<_DueSheet> {
                           Expanded(
                             child: Text(
                               [
-                                if (payer != null) '${store.shortName(payer)} pays',
+                                if (payer != null) payer.isYou ? 'You pay' : '${store.shortName(payer)} pays',
                                 if (yourShare > 0) 'your share ${inr(yourShare)}',
                               ].join(' · '),
                               style: ranade(14, color: c.ink2),

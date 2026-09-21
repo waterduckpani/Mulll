@@ -194,6 +194,8 @@ class _NextUp extends StatelessWidget {
                           ? 'Your share of ${inr(schedule.amount)}'
                           : payer == null
                           ? inr(schedule.amount)
+                          : payer.isYou
+                          ? 'You pay ${inr(schedule.amount)}'
                           : '${store.shortName(payer)} pays ${inr(schedule.amount)}',
                       style: MullType.caption(c.ink3, size: 12.5),
                       maxLines: 1,

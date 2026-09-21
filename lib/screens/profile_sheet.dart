@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/links.dart';
 import '../core/upi.dart';
 import '../data/remote/auth_service.dart';
 import '../data/remote/backend.dart';
@@ -131,6 +132,25 @@ class _AccountRowState extends State<_AccountRow> {
             await store.forgetAccount();
             nav.pop();
           },
+        ),
+        const SizedBox(height: 18),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            for (final (label, page) in [
+              ('Privacy', MullLinks.privacy),
+              ('Terms', MullLinks.terms),
+              ('Help', MullLinks.support),
+            ])
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => MullLinks.open(page),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Text(label, style: ranade(12.5, color: c.ink3)),
+                ),
+              ),
+          ],
         ),
       ],
     );

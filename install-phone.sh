@@ -69,7 +69,8 @@ fi
 
 if [ "$BUILD" = "1" ]; then
   echo "Building release..."
-  flutter build ios --release \
+  DSN=$(cat .secrets/sentry-dsn 2>/dev/null || true)
+  flutter build ios --release ${DSN:+--dart-define=SENTRY_DSN=$DSN} \
     --dart-define=SUPABASE_URL=https://nfuujjyscybqdcfryiwk.supabase.co \
     --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mdXVqanlzY3licWRjZnJ5aXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk1NjkzNDcsImV4cCI6MjEwNTE0NTM0N30.TVpPThLe_P5LVgbwa_QnRBlfyIXcJli95cFM7NBvh2M
 else

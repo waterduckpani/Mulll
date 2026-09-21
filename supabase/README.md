@@ -211,3 +211,19 @@ sent is a failed push.
   and a reminder is a WhatsApp message the user sends by hand.
 - **No pay-by-link yet.** The public page that lets someone pay their share
   without installing Mull is still to build; it is the growth loop.
+
+## Push, broadcast and revisions (2026-09-21)
+
+`20260921160000_scale_privacy_push.sql` replaced the realtime change stream
+with per-user broadcast (`user:<uid>`, private, sent by triggers) and gave
+every group a revision in `group_revs`, so a pull fetches only groups that
+moved. The realtime publication is now empty on purpose.
+
+Push: a notice insert calls the `push` edge function through pg_net. It needs
+two Vault entries (`push_function_url`, `push_webhook_secret`) and the
+function's secrets; `./tool/push-setup.sh` does all of it, and
+`./tool/push-setup.sh AuthKey_XXXX.p8` adds the APNs key. Until the key is
+in, the function answers "no APNs key configured" and nothing else changes.
+
+The App Review account is made and reset by `./tool/review-account.sh`,
+seeded from `seed/review_account.sql`.

@@ -17,6 +17,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/links.dart';
 import '../core/upi.dart';
 import '../data/remote/auth_service.dart';
 import '../data/remote/backend.dart';
@@ -252,7 +253,8 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
             ? 'Same address as before. We will send a six-digit code, so there '
                   'is still no password to remember.'
             : 'We send a six-digit code, so there is no password to remember. '
-                  'This is also the address friends use to add you to a group.',
+                  'This is also the address friends use to add you to a group. '
+                  'Continuing means you agree to the terms and privacy policy.',
       ),
       _Step.code when _review => (
         eyebrow: '$n of $of',
@@ -406,6 +408,17 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
               if (_error != null) ...[
                 const SizedBox(height: 18),
                 _ErrorNote(_error!),
+              ],
+              // The notice the law asks for, where the account is made.
+              if (_step == _Step.email && !_returning) ...[
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    _TextLink('Privacy', onTap: () => MullLinks.open(MullLinks.privacy)),
+                    const SizedBox(width: 20),
+                    _TextLink('Terms', onTap: () => MullLinks.open(MullLinks.terms)),
+                  ],
+                ),
               ],
               if (_step == _Step.code) ...[
                 const SizedBox(height: 20),
