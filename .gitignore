@@ -56,3 +56,6 @@ app.*.map.json
 
 # Credentials made by tool/review-account.sh
 /.secrets/
+
+# Typefaces: licensed to embed, not to republish. ./tool/fetch-fonts.sh
+/assets/fonts/
