@@ -1,0 +1,4 @@
+# Supabase CLI state: project ref, pooler URL, cached versions
+.temp/
+.branches/
+.env
