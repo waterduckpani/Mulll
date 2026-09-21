@@ -20,6 +20,9 @@
 
 set -e
 
+# The typefaces are not in git (see tool/fetch-fonts.sh).
+[ -f assets/fonts/Ranade-Regular.otf ] || ./tool/fetch-fonts.sh
+
 SAMPLE=""
 ARGS=""
 for arg in "$@"; do

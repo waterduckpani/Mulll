@@ -23,6 +23,9 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
+# The typefaces are not in git (see tool/fetch-fonts.sh).
+[ -f assets/fonts/Ranade-Regular.otf ] || ./tool/fetch-fonts.sh
+
 BUILD=$(git rev-list --count HEAD)
 VERSION=$(sed -n 's/^version: \([0-9.]*\).*/\1/p' pubspec.yaml)
 

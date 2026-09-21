@@ -1,0 +1,40 @@
+# Publishes site/ (privacy policy, terms, support) to GitHub Pages at
+# https://mull.oblunestudio.com, whenever it changes on main.
+#
+# One-time setup, in the repo on github.com:
+#   Settings -> Pages -> Source: GitHub Actions
+#   Settings -> Pages -> Custom domain: mull.oblunestudio.com -> Save,
+#                        then tick Enforce HTTPS once it offers it
+# and in GoDaddy DNS: CNAME  mull  ->  waterduckpani.github.io
+
+name: Publish site
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/site.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

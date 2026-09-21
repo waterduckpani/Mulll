@@ -1,0 +1,20 @@
+Copyright (c) 2026 Bharat Khanna and Dilip Khanna. All rights reserved.
+
+This repository is published so that people can read it: as a portfolio, and
+as a reference for how Mull is built. It is source-available, not open source.
+
+You may view and read the source code, and link to it.
+
+You may not, without written permission:
+  - copy, modify, or reuse any part of it in another project, product or app;
+  - build, publish or distribute Mull or anything derived from it, including
+    on any app store;
+  - use the name "Mull", its logo, or its designs.
+
+Nothing in this repository grants a licence to the Supabase project, the App
+Store listing, or any data. The typefaces Chillax, Excon and Ranade belong to
+the Indian Type Foundry and are not included here; see tool/fetch-fonts.sh.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+Questions or permission requests: mullapp.official@gmail.com

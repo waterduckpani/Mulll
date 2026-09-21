@@ -24,6 +24,9 @@
 
 set -e
 
+# The typefaces are not in git (see tool/fetch-fonts.sh).
+[ -f assets/fonts/Ranade-Regular.otf ] || ./tool/fetch-fonts.sh
+
 WAIT=0
 BUILD=1
 DEVICE=""

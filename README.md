@@ -1,8 +1,18 @@
-# Mull (iOS)
+# Mull
 
-Splitting money with people, built in Flutter from the Claude Design mockups.
+**Split money with the people you live, travel and eat with, and settle it over UPI.**
+An iOS app for India, built in Flutter on Supabase.
 
-Who paid, who owes, and the fewest payments that clear it — settled over UPI,
+<p>
+  <img src="store/screenshots/01.png" width="240" alt="Home: everything you owe, in one number">
+  <img src="store/screenshots/02.png" width="240" alt="Money between two people nets off">
+  <img src="store/screenshots/03.png" width="240" alt="A payment is claimed, then confirmed">
+</p>
+
+> **Source-available, not open source.** This repository is public so it can be read as a
+> portfolio and a reference. It may not be copied, reused or republished. See [LICENSE](LICENSE).
+
+Who paid, who owes, and the fewest payments that clear it, settled over UPI,
 which Mull never touches. Groups for a trip or a flat, one-to-one ledgers for
 everything that is not a group, and schedules for the things that come round
 every month on their own.
@@ -24,7 +34,34 @@ The things it does that other split apps do not:
   surfaces as a card with the amount in an editable field. What you confirm is
   what gets recorded, and it becomes the new normal.
 
+
+## How it is built
+
+- **Flutter (iOS), local-first.** Every edit applies to a JSON file on the phone first and syncs
+  afterwards, so the app works on a train with no signal. `MullStore` keeps a print of each row as
+  the server last saw it (`Group.acked`), so a push sends only what changed and a pull never
+  overwrites an edit that has not gone up yet.
+- **Supabase in Mumbai.** Postgres with row-level security on every table: the database, not the
+  app, decides who can read or change what, so a modified client gets nowhere. Seats rather than
+  users, so someone can be split with before they sign up and claim their history later.
+- **Sync that scales.** Each group carries a revision the server bumps on any change. A pull asks
+  for the revision list and fetches only the groups that moved. Live updates arrive over one
+  private realtime topic per user, sent by database triggers.
+- **Trust in the ledger.** Only the person paid can confirm a payment, and confirmed facts are
+  frozen by triggers. UPI IDs come only from their owner's account, because a typo in a payer-typed
+  UPI ID pays a stranger.
+- **Push** through APNs from an edge function the database calls on each new notice, with the
+  sender's words only ever in the body and the bold line written by the server.
+- **Privacy by construction.** Group-mates see a name and a UPI ID; emails only cross a friendship;
+  error reports are scrubbed of emails and ids before they are stored.
+
+The Supabase anon key in the build scripts is meant to be public: it is shipped inside every
+copy of the app, and row-level security is what protects the data.
+
 ## Run
+
+The typefaces are not in the repository (their licence does not allow it). The build scripts
+download them from Fontshare on first run, or run `./tool/fetch-fonts.sh` yourself.
 
 ```sh
 ./run-dev.sh                                  # against the live Supabase project
