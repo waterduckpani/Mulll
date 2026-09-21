@@ -715,30 +715,62 @@ class MullStore extends ChangeNotifier {
 
   /// Leaving is always yours to do — but not at the cost of the ledger's
   /// arithmetic, and not if it would leave the group unadministered.
+  ///
+  /// Settled is what matters, not "never took part". It used to refuse anyone
+  /// who had ever paid for or shared a bill, which is everyone, so nobody could
+  /// leave a group they had actually used. A settled seat stays in the history
+  /// under your name and stops being yours; see [leaveGroupEverywhere].
   String? whyYouCannotLeave(Group group) {
     final you = group.you;
     if (you == null) return null;
     if (group.isDirect) return null;
-    if (_ledgerNeeds(group, you)) {
-      return 'You have paid for something or owe a share here. Settle up first, '
-          'or the numbers stop adding up for everyone else.';
+    if (group.yourBalance != 0) {
+      return 'You still owe or are owed money here. Settle up first, or the '
+          'numbers stop adding up for everyone else.';
     }
-    if (you.isAdmin && group.admins.length < 2 && group.members.length > 1) {
+    if (group.settlements.any(
+      (s) => s.status == SettlementStatus.pending && (s.fromId == you.id || s.toId == you.id),
+    )) {
+      return 'A payment with you is still waiting to be confirmed. Once it is, '
+          'you can leave.';
+    }
+    final othersOnMull = group.members.any((m) => !m.isYou && m.isLinked);
+    if (you.isAdmin && group.admins.length < 2 && othersOnMull) {
       return 'You are the only admin. Make someone else one first, so the group '
           'still has somebody who can run it.';
     }
     return null;
   }
 
+  /// Asks the server to take you out of a group. Supplied by the sync: an
+  /// empty seat can be deleted from here, but a seat with history has to stay
+  /// and only stop being yours, which the member guard only lets the server
+  /// do. False if it could not be reached.
+  Future<bool> Function(String groupId)? onLeave;
+
+  /// Leaves for real, on the server as well as this phone.
+  Future<bool> leaveGroupEverywhere(Group group) async {
+    if (group.you == null || whyYouCannotLeave(group) != null) return false;
+    if (!group.hasReachedServer || onLeave == null) return leaveGroup(group);
+    if (!await onLeave!(group.id)) return false;
+    groups.removeWhere((g) => g.id == group.id);
+    _commit();
+    return true;
+  }
+
+  /// Leaves on this phone. The seat is deleted only when nothing refers to
+  /// it; a seat with history is the server's to detach.
   bool leaveGroup(Group group) {
     final you = group.you;
     if (you == null || whyYouCannotLeave(group) != null) return false;
-    group.members.removeWhere((m) => m.id == you.id);
-    // Your seat has to be deleted on the server too, or the group is handed
-    // straight back by the next pull and leaving does nothing at all. The push
-    // below carries the tombstone while the group is still in hand.
-    _tombstone(group, you.id, TombstoneKind.member);
-    _commitGroup(group);
+    if (!_ledgerNeeds(group, you)) {
+      group.members.removeWhere((m) => m.id == you.id);
+      // Your seat has to be deleted on the server too, or the group is handed
+      // straight back by the next pull and leaving does nothing at all. The
+      // push below carries the tombstone while the group is still in hand.
+      _tombstone(group, you.id, TombstoneKind.member);
+      _commitGroup(group);
+    }
     // Gone from this phone as well: without a seat in it there is nothing here
     // to see, and the next pull will not return it.
     groups.removeWhere((g) => g.id == group.id);
@@ -1297,6 +1329,9 @@ class MullStore extends ChangeNotifier {
   }
 
   void confirmSettlement(Group group, Settlement settlement) {
+    // Twice is a double tap, or a card still on screen after it was handled.
+    // It used to send the payer the same notification each time.
+    if (settlement.status == SettlementStatus.confirmed) return;
     settlement
       ..status = SettlementStatus.confirmed
       ..confirmedAt = now();

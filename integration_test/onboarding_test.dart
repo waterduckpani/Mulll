@@ -79,7 +79,7 @@ void main() {
           'replace this screen before anyone saw it',
     );
 
-    await tapText(t, 'Take me in');
+    await tapText(t, 'Skip for now');
     await settle(t, 1800);
     expect(store.profile.onboarded, isTrue);
     await shot(t, 'onb-7-first-run');

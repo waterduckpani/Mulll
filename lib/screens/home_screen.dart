@@ -4,6 +4,7 @@ import '../core/dates.dart';
 import '../core/money.dart';
 import '../data/models.dart';
 import '../data/remote/friends_service.dart';
+import '../data/remote/live_channel.dart';
 import '../data/store.dart';
 import '../ui/group_icons.dart';
 import '../ui/icons.dart';
@@ -226,7 +227,9 @@ class _Headline extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(Gutter.text, 10, Gutter.text, 0),
             child: Text(
-              "Some changes haven't synced yet. They'll go up when you're back online.",
+              LiveChannel.instance.connected.value
+                  ? "Some changes haven't synced yet. Mull keeps trying."
+                  : "Some changes haven't synced yet. They'll go up when you're back online.",
               style: MullType.caption(c.ink3, size: 12),
             ),
           ),

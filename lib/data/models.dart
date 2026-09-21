@@ -779,6 +779,7 @@ class Profile {
     this.onboarded = false,
     this.upiId,
     this.phone,
+    this.payWith,
   });
 
   String name;
@@ -792,6 +793,11 @@ class Profile {
   /// E.164, optional. Only used so someone can find you by number.
   String? phone;
 
+  /// Which UPI app "Pay over UPI" opens, by its key in `UpiApp.all`. Per
+  /// phone, not per account: it is about what is installed here. Null until
+  /// someone with more than one app picks.
+  String? payWith;
+
   String get initial => name.trim().isEmpty ? '·' : name.trim()[0].toUpperCase();
 
   Map<String, dynamic> toJson() => {
@@ -800,6 +806,7 @@ class Profile {
     'onboarded': onboarded,
     'upiId': upiId,
     'phone': phone,
+    'payWith': payWith,
   };
 
   factory Profile.fromJson(Map<String, dynamic> j) => Profile(
@@ -808,5 +815,6 @@ class Profile {
     onboarded: j['onboarded'] as bool? ?? false,
     upiId: j['upiId'] as String?,
     phone: j['phone'] as String?,
+    payWith: j['payWith'] as String?,
   );
 }

@@ -23,6 +23,7 @@ import '../ui/icons.dart';
 import '../ui/sheet.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
+import 'upi_picker.dart';
 
 /// Answers with the ledger to open, if one was tapped.
 ///
@@ -367,13 +368,14 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
     final standing = _standing!;
     final upi = _payeeUpi;
     if (upi == null) return;
-    final opened = await openUpiPayment(
+    final opened = await payOverUpi(
+      context,
       upiId: upi,
       name: standing.member.name,
       amount: _value!,
       note: standing.groups.length == 1 ? standing.groups.first.title : 'Mull',
     );
-    if (!mounted) return;
+    if (!mounted || opened == null) return;
     if (!opened) {
       Toast.show(
         context,

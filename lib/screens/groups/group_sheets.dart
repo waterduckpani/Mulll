@@ -7,6 +7,7 @@ import '../../core/dates.dart';
 import '../../core/money.dart';
 import '../../core/split.dart';
 import '../../core/upi.dart';
+import '../upi_picker.dart';
 import '../../data/models.dart';
 import '../../data/remote/auth_service.dart';
 import '../../data/remote/friends_service.dart';
@@ -377,17 +378,18 @@ class _SettleSheetState extends State<_SettleSheet> {
       );
     }
 
-    Future<void> payOverUpi() async {
+    Future<void> payWithUpi() async {
       final upi = payee.upiId;
       if (upi == null) return;
       final amount = _value!;
-      final opened = await openUpiPayment(
+      final opened = await payOverUpi(
+        context,
         upiId: upi,
         name: payee.name,
         amount: amount,
         note: group.title,
       );
-      if (!context.mounted) return;
+      if (!context.mounted || opened == null) return;
       if (!opened) {
         Toast.show(
           context,
@@ -462,7 +464,7 @@ class _SettleSheetState extends State<_SettleSheet> {
           if (youPay && payee.upiId != null) ...[
             PillButton(
               _valid ? 'Pay ${inr(_value!)} over UPI' : 'Pay over UPI',
-              onTap: _valid ? payOverUpi : null,
+              onTap: _valid ? payWithUpi : null,
             ),
             const SizedBox(height: 8),
             SecondaryButton('Already paid, just record it', onTap: _valid ? record : null),
@@ -849,11 +851,17 @@ Future<void> shareGroupSummary(BuildContext context, Group group) async {
 
 // ------------------------------------------------------------------- member
 
-/// Edit one person: their name, the number a reminder goes to, and the UPI ID
-/// that makes settling one tap.
+/// One person in a group.
+///
+/// Someone on Mull is read-only here: their name and UPI ID come from their
+/// own account, and the only person who should ever type a payment address is
+/// the one being paid. A seat nobody has claimed yet can be named, given an
+/// address to invite, and given a UPI ID. An admin also gets the group's
+/// decisions about this person — make them an admin, take them out — on the
+/// same tap rather than behind a long-press nobody found.
 Future<void> showMemberSheet(BuildContext context, Group group, Member member) => showMullSheet(
   context,
-  height: 720,
+  height: member.isLinked && !member.isYou ? 560 : 640,
   builder: (_) => _MemberSheet(group: group, member: member),
 );
 
@@ -871,7 +879,12 @@ class _MemberSheetState extends State<_MemberSheet> {
   late final _name = TextEditingController(text: widget.member.name);
   late final _upi = TextEditingController(text: widget.member.upiId ?? '');
   late final _email = TextEditingController(text: widget.member.email ?? '');
-  late final _phone = TextEditingController(text: widget.member.phone ?? '');
+
+  Member get member => widget.member;
+  Group get group => widget.group;
+
+  /// Nothing to type: their details are their account's.
+  bool get _readOnly => member.isLinked && !member.isYou;
 
   @override
   void initState() {
@@ -884,13 +897,11 @@ class _MemberSheetState extends State<_MemberSheet> {
     _name.dispose();
     _upi.dispose();
     _email.dispose();
-    _phone.dispose();
     super.dispose();
   }
 
   void _save() {
     final store = context.readStore;
-    final member = widget.member;
     final name = _name.text.trim();
     if (member.isYou) {
       // Your seat's name is your account's name — the pull takes it from the
@@ -902,20 +913,81 @@ class _MemberSheetState extends State<_MemberSheet> {
     } else if (name.isNotEmpty) {
       member.name = name;
     }
-    final email = _email.text.trim().toLowerCase();
-    final before = member.email;
-    member.email = email.isEmpty ? null : email;
-    // A seat is claimed by its address only into a group where the person has
-    // accepted somebody as a friend. Asking them is what makes the address
-    // mean anything, and it is them saying yes — not you typing it — that
-    // puts this group's balances on their phone.
-    if (!member.isLinked && email.isNotEmpty && email != before) {
-      unawaited(FriendsService.request(email));
+    if (!member.isYou) {
+      final email = _email.text.trim().toLowerCase();
+      final before = member.email;
+      member.email = email.isEmpty ? null : email;
+      // A seat is claimed by its address only into a group where the person
+      // has accepted somebody as a friend. Asking them is what makes the
+      // address mean anything, and it is them saying yes — not you typing it —
+      // that puts this group's balances on their phone.
+      if (email.isNotEmpty && email != before) {
+        unawaited(FriendsService.request(email));
+      }
     }
-    store.setPhone(member, _phone.text);
     store.setUpiId(member, _upi.text);
     HapticFeedback.mediumImpact();
     Navigator.of(context).pop();
+  }
+
+  /// Runs [action] once this sheet is gone, so a toast lands on the screen
+  /// behind rather than on a sheet that is closing.
+  void _then(VoidCallback action) {
+    Navigator.of(context).pop();
+    Future.delayed(const Duration(milliseconds: 160), action);
+  }
+
+  Widget? _adminActions(BuildContext context) {
+    final store = context.readStore;
+    if (!group.youAreAdmin || group.isDirect || member.isYou) return null;
+    final outer = Navigator.of(context).context;
+    final lastAdmin = member.isAdmin && group.admins.length < 2;
+    final why = store.whyMemberStays(group, member);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        CardRows(
+          children: [
+            if (member.isLinked)
+              SheetAction(
+                member.isAdmin ? 'Remove as admin' : 'Make an admin',
+                detail: lastAdmin ? 'last admin' : (member.isAdmin ? null : 'can add people'),
+                onTap: () => _then(() {
+                  final wasAdmin = member.isAdmin;
+                  if (store.setAdmin(group, member, !wasAdmin)) {
+                    HapticFeedback.mediumImpact();
+                    Toast.show(
+                      outer,
+                      wasAdmin
+                          ? '${store.shortName(member)} is no longer an admin'
+                          : '${store.shortName(member)} can run this group now',
+                    );
+                  } else {
+                    Toast.show(outer, 'A group needs at least one admin');
+                  }
+                }),
+              ),
+            SheetAction(
+              'Remove from group',
+              destructive: true,
+              detail: why == null ? null : 'not possible',
+              onTap: () => _then(() {
+                if (store.removeMember(group, member)) {
+                  HapticFeedback.mediumImpact();
+                  Toast.show(outer, 'Removed ${store.shortName(member)}');
+                } else if (why != null) {
+                  Toast.show(outer, why);
+                }
+              }),
+            ),
+          ],
+        ),
+        if (why != null) ...[
+          const SizedBox(height: 12),
+          Text(why, style: MullType.caption(context.c.ink3)),
+        ],
+      ],
+    );
   }
 
   @override
@@ -923,94 +995,167 @@ class _MemberSheetState extends State<_MemberSheet> {
     final c = context.c;
     final typed = _upi.text.trim();
     final looksRight = typed.isEmpty || isUpiId(typed);
+    final admin = _adminActions(context);
+
+    final Widget body;
+    if (_readOnly) {
+      final upi = member.upiId;
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            member.isAdmin && !group.isDirect ? 'On Mull · admin of this group' : 'On Mull',
+            style: MullType.caption(c.ink3),
+          ),
+          const SizedBox(height: 18),
+          // Label above value, not beside it: a UPI ID is long, and squeezed
+          // into the right half of a row it was cut off at the "@" — the
+          // part that says which bank.
+          Pressable(
+            onTap: upi == null
+                ? null
+                : () {
+                    Clipboard.setData(ClipboardData(text: upi));
+                    HapticFeedback.selectionClick();
+                    Toast.show(context, 'UPI ID copied');
+                  },
+            scale: .99,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(22, 16, 22, 18),
+              decoration: BoxDecoration(color: c.quiet, borderRadius: BorderRadius.circular(22)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Their UPI ID', style: ranade(12.5, color: c.ink3)),
+                  const SizedBox(height: 6),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(upi ?? 'Not added yet', style: excon(18, color: upi == null ? c.ink3 : c.ink)),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            upi == null
+                ? 'They add it from their own profile. Mull never asks you for someone else\'s.'
+                : 'From their own account, so it is the one they get paid at. Tap to copy.',
+            style: MullType.caption(c.ink3),
+          ),
+          if (admin != null) ...[const SizedBox(height: 26), admin],
+        ],
+      );
+    } else {
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          BigField(controller: _name, hint: 'Name'),
+          if (!member.isYou) ...[
+            const SizedBox(height: 26),
+            BigField(
+              controller: _email,
+              size: 20,
+              hint: 'their@email.com',
+              keyboardType: TextInputType.emailAddress,
+              help: Text(
+                'Optional. They get a friend request, and once they accept, this '
+                'seat becomes theirs with everything already in it.',
+                style: ranade(12, height: 1.5, color: c.ink3),
+              ),
+            ),
+          ],
+          const SizedBox(height: 26),
+          BigField(
+            controller: _upi,
+            size: 20,
+            hint: 'name@bank',
+            help: Text(
+              looksRight
+                  ? (member.isYou
+                        ? 'Goes into the summaries you send, so people can pay you back.'
+                        : 'Only until they join. Then it comes from their own account.')
+                  : "That doesn't look like a UPI ID. They usually read name@bank.",
+              style: ranade(12, height: 1.5, color: c.ink3),
+            ),
+          ),
+          if (admin != null) ...[const SizedBox(height: 26), admin],
+        ],
+      );
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SheetHeader(widget.member.isYou ? 'You' : widget.member.name),
+        SheetHeader(member.isYou ? 'You' : member.name),
         Expanded(
           child: SingleChildScrollView(
             physics: const BouncingScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(30, 12, 30, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                BigField(controller: _name, hint: 'Name'),
-                if (!widget.member.isYou) ...[
-                  const SizedBox(height: 26),
-                  BigField(
-                    controller: _email,
-                    size: 20,
-                    hint: 'their@email.com',
-                    keyboardType: TextInputType.emailAddress,
-                    help: Text(
-                      widget.member.isLinked
-                          ? 'They are on Mull and see this group.'
-                          : 'They get a friend request. Once they accept it, this seat '
-                                'is theirs, with everything they already owe or are owed.',
-                      style: ranade(12, height: 1.5, color: c.ink3),
-                    ),
-                  ),
-                  const SizedBox(height: 26),
-                  BigField(
-                    controller: _phone,
-                    size: 20,
-                    hint: '+91 98765 43210',
-                    keyboardType: TextInputType.phone,
-                    help: Text(
-                      'Where a reminder goes. With a number, chasing them is one '
-                      'tap into their WhatsApp; without one you have to find them '
-                      'yourself.',
-                      style: ranade(12, height: 1.5, color: c.ink3),
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 26),
-                // A seat with an account behind it takes its VPA from that
-                // account, so there is nothing here to edit — and editing it
-                // would be the old mistake: a payment address entered by the
-                // person doing the paying.
-                if (widget.member.isLinked && !widget.member.isYou)
-                  CardRows(
-                    children: [
-                      SizedBox(
-                        height: 58,
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text('Their UPI ID', style: ranade(15.5, color: c.ink)),
-                            ),
-                            Text(widget.member.upiId ?? 'Not set', style: excon(15, color: c.ink2)),
-                          ],
-                        ),
-                      ),
-                    ],
-                  )
-                else
-                  BigField(
-                    controller: _upi,
-                    size: 20,
-                    hint: 'name@bank',
-                    help: Text(
-                      looksRight
-                          ? (widget.member.isYou
-                                ? 'Goes into the summaries you send, so people can pay you back.'
-                                : 'Settling up opens GPay or PhonePe with the amount already filled in.')
-                          : "That doesn't look like a UPI ID. They usually read name@bank.",
-                      style: ranade(12, height: 1.5, color: c.ink3),
-                    ),
-                  ),
-              ],
-            ),
+            child: body,
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
-          child: PillButton('Save', onTap: looksRight ? _save : null),
-        ),
+        if (!_readOnly)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
+            child: PillButton('Save', onTap: looksRight ? _save : null),
+          ),
       ],
     );
   }
+}
+
+// -------------------------------------------------------------------- leave
+
+/// Asks, then leaves. True once you are out, on the server as well.
+///
+/// When something stands in the way, it says what, rather than showing a
+/// greyed-out button and leaving you to guess.
+Future<bool> confirmLeaveGroup(BuildContext context, Group group) async {
+  final store = context.readStore;
+  final why = store.whyYouCannotLeave(group);
+  final confirmed = await showMullSheet<bool>(
+    context,
+    fitContent: true,
+    builder: (sheet) => Padding(
+      padding: const EdgeInsets.fromLTRB(30, 30, 30, 26),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            why == null ? 'Leave ${group.title}?' : 'Not just yet',
+            style: excon(28, tracking: -.02, color: sheet.c.ink),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            why ??
+                'It disappears from your phone. Everyone else keeps the group, '
+                    'and the expenses you were part of stay in it under your name.',
+            style: ranade(14, height: 1.6, color: sheet.c.ink3),
+          ),
+          const SizedBox(height: 24),
+          if (why == null) ...[
+            PillButton('Leave it', onTap: () => Navigator.of(sheet).pop(true)),
+            const SizedBox(height: 8),
+            SecondaryButton('Stay', onTap: () => Navigator.of(sheet).pop(false)),
+          ] else
+            PillButton('OK', onTap: () => Navigator.of(sheet).pop(false)),
+        ],
+      ),
+    ),
+  );
+  if (confirmed != true || !context.mounted) return false;
+  final left = await store.leaveGroupEverywhere(group);
+  if (!context.mounted) return left;
+  if (left) {
+    HapticFeedback.mediumImpact();
+    Toast.show(context, 'You left ${group.title}');
+  } else {
+    Toast.show(context, "Couldn't reach Mull. Try again in a moment.");
+  }
+  return left;
 }
 
 // ----------------------------------------------------------------- settings
@@ -1117,6 +1262,13 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
     }
   }
 
+  Future<void> _leave() async {
+    final nav = Navigator.of(context);
+    // The group screen behind treats this the same as a delete: the group is
+    // gone from this phone either way.
+    if (await confirmLeaveGroup(context, widget.group)) nav.pop('deleted');
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.c;
@@ -1215,18 +1367,15 @@ class _GroupSettingsSheetState extends State<_GroupSettingsSheet> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              SecondaryButton(
-                group.isDirect ? 'Delete this ledger' : 'Delete group',
-                onTap: admin ? _delete : null,
-              ),
-              if (!admin) ...[
-                const SizedBox(height: 10),
-                Text(
-                  'Only an admin can delete a group. You can leave it from People.',
-                  textAlign: TextAlign.center,
-                  style: MullType.caption(c.ink3, size: 11.5),
-                ),
-              ],
+              // An admin deletes; everyone else leaves. A delete button that
+              // is greyed out for most people is a door with no handle.
+              if (admin)
+                SecondaryButton(
+                  group.isDirect ? 'Delete this ledger' : 'Delete group',
+                  onTap: _delete,
+                )
+              else
+                SecondaryButton('Leave group', onTap: _leave),
             ],
           ),
         ),

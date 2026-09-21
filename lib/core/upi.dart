@@ -31,7 +31,58 @@ Uri upiPaymentUri({required String upiId, required String name, required int amo
   );
 }
 
-/// Opens GPay, PhonePe, Paytm or whichever UPI app is installed.
+/// A UPI app Mull can hand a payment to directly.
+///
+/// `upi://pay` lets iOS choose, and iOS does not choose well: WhatsApp
+/// registers the scheme too, and on plenty of phones it wins over the
+/// PhonePe or Paytm the person actually pays with. Each app's own scheme
+/// takes the same query and goes straight to that app.
+class UpiApp {
+  const UpiApp(this.key, this.label, this.prefix);
+
+  /// Stored in the profile. Never change one once shipped.
+  final String key;
+  final String label;
+
+  /// Everything before the `?`. The query is the standard UPI one.
+  final String prefix;
+
+  /// iOS's pick among whatever registered `upi:`. Last resort, and what the
+  /// app did for everyone before.
+  static const any = UpiApp('any', 'Any UPI app', 'upi://pay');
+
+  /// Order is the order in the picker. Every scheme here must also be listed
+  /// under LSApplicationQueriesSchemes in Info.plist, or iOS answers "not
+  /// installed" whatever the truth.
+  static const all = [
+    UpiApp('gpay', 'Google Pay', 'tez://upi/pay'),
+    UpiApp('phonepe', 'PhonePe', 'phonepe://pay'),
+    UpiApp('paytm', 'Paytm', 'paytmmp://pay'),
+    UpiApp('cred', 'CRED', 'credpay://upi/pay'),
+    UpiApp('bhim', 'BHIM', 'bhim://upi/pay'),
+    UpiApp('fampay', 'FamPay', 'fampay://upi/pay'),
+  ];
+
+  static UpiApp? byKey(String? key) =>
+      key == any.key ? any : all.where((a) => a.key == key).firstOrNull;
+
+  Uri uriFor(Uri payment) => Uri.parse('$prefix?${payment.query}');
+}
+
+/// The UPI apps on this phone, in picker order. Empty on the simulator.
+Future<List<UpiApp>> installedUpiApps() async {
+  final found = <UpiApp>[];
+  for (final app in UpiApp.all) {
+    try {
+      if (await canLaunchUrl(Uri.parse('${app.prefix.split('://').first}://'))) found.add(app);
+    } catch (_) {
+      // Not listed in Info.plist, or no answer. Treated as not installed.
+    }
+  }
+  return found;
+}
+
+/// Opens [app] (iOS's choice if null) with the payment filled in.
 ///
 /// False means no app could take it — on a phone with none installed, or on the
 /// simulator. The caller should fall back to showing the ID rather than
@@ -41,10 +92,18 @@ Future<bool> openUpiPayment({
   required String name,
   required int amount,
   String? note,
+  UpiApp? app,
 }) async {
-  final uri = upiPaymentUri(upiId: upiId, name: name, amount: amount, note: note);
+  final payment = upiPaymentUri(upiId: upiId, name: name, amount: amount, note: note);
+  final uri = app == null || app.key == UpiApp.any.key ? payment : app.uriFor(payment);
   try {
-    return await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (await launchUrl(uri, mode: LaunchMode.externalApplication)) return true;
+  } catch (_) {
+    // Fall through to letting iOS choose.
+  }
+  if (uri == payment) return false;
+  try {
+    return await launchUrl(payment, mode: LaunchMode.externalApplication);
   } catch (_) {
     return false;
   }

@@ -1399,6 +1399,12 @@ void main() {
       expect(s.whyYouCannotLeave(g), contains('Settle up first'));
       expect(s.leaveGroup(g), isFalse);
       expect(s.groups, hasLength(1));
+
+      // Settled, the history is no longer a reason to stay.
+      s.settleUp(g, fromId: sahil.id, toId: g.you!.id, amount: 400);
+      expect(s.whyYouCannotLeave(g), isNull);
+      expect(s.leaveGroup(g), isTrue);
+      expect(s.groups, isEmpty);
     });
 
     test('an icon is an admin\'s to set', () {

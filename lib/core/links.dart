@@ -9,6 +9,10 @@ class MullLinks {
   static final terms = Uri.parse('$site/terms.html');
   static final support = Uri.parse('$site/support.html');
 
+  /// Where an invite sends people. The site until the App Store listing is
+  /// live; swap in the apps.apple.com link the day it is.
+  static const download = site;
+
   /// In Safari's in-app sheet, so reading the policy does not leave Mull.
   static Future<void> open(Uri page) async {
     try {

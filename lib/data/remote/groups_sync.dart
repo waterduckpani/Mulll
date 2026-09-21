@@ -18,6 +18,7 @@ import '../models.dart';
 import '../store.dart';
 import 'auth_service.dart';
 import 'backend.dart';
+import 'error_reporter.dart';
 import 'live_channel.dart';
 
 class GroupsSync {
@@ -97,6 +98,7 @@ class GroupsSync {
         schedulePush(group.id);
       })
       ..onGroupDeleted = deleteGroup
+      ..onLeave = leave
       // [resume] rather than [pull]: every caller of `pullNow()` — a resume, a
       // pull-to-refresh — is someone asking "is this current?", and a dead
       // socket is the most likely reason it is not.
@@ -186,7 +188,12 @@ class GroupsSync {
     // up gets another try. This is the offline queue: edits that failed stay
     // marked unsent in [Group.acked] and are retried here until they land.
     if (reached) await _retryPending();
-    _store.setSyncTrouble(!reached || _store.hasPendingChanges);
+    // Only a push that failed is trouble. A pull that failed is a phone
+    // between towers, or waking from the background a moment before its
+    // network does; it used to put "changes haven't synced" under a group
+    // that had synced fine, on a phone that was online, because something
+    // was mid-push at the time.
+    if (reached && !_store.hasPendingChanges) _store.setSyncTrouble(false);
   }
 
   /// True if the server answered.
@@ -437,6 +444,23 @@ class GroupsSync {
     });
   }
 
+  /// Takes you out of a group on the server.
+  ///
+  /// Anything still waiting to go up is sent first, so leaving does not
+  /// throw away the last thing you added.
+  Future<bool> leave(String groupId) async {
+    if (!_live) return false;
+    await push(groupId);
+    try {
+      await Backend.client.rpc('leave_group', params: {'target_group': groupId});
+      return true;
+    } catch (e) {
+      debugPrint('mull: leave_group failed ($e)');
+      if (e is PostgrestException) ErrorReporter.report(e, StackTrace.current, context: 'leave_group');
+      return false;
+    }
+  }
+
   /// Sends up what has changed in a group since the server last had it.
   ///
   /// By id, not by object: a pull replaces the group objects, and a push
@@ -613,6 +637,11 @@ class GroupsSync {
         'mull:   uid=${Backend.user?.id} hasSession=${session != null} '
         'expired=${session?.isExpired} expiresAt=${session?.expiresAt}',
       );
+      // The server refusing something is a bug to hear about, not weather.
+      // Until now it only ever reached the console of a phone on a desk.
+      if (e is PostgrestException) {
+        ErrorReporter.report(e, StackTrace.current, context: 'push (${sent.length} rows landed first)');
+      }
       _store.setSyncTrouble(true);
       return false;
     }

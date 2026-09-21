@@ -12,14 +12,12 @@
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../core/money.dart';
 import '../../data/models.dart';
 import '../../data/store.dart';
 import '../../ui/icons.dart';
 import '../../ui/page.dart';
-import '../../ui/sheet.dart';
 import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
 import '../friends_sheet.dart';
@@ -44,7 +42,6 @@ class GroupMembersScreen extends StatelessWidget {
     // profile, which has none — so asking `isLinked` about yourself says no
     // and the header confidently reported you as not on Mull.
     final onMull = group.members.where((m) => m.isYou || m.isLinked).length;
-    final cannotLeave = store.whyYouCannotLeave(group);
 
     Future<void> addFromFriends() async {
       final picked = await showFriendPicker(
@@ -73,36 +70,11 @@ class GroupMembersScreen extends StatelessWidget {
     }
 
     Future<void> leave() async {
-      final confirmed = await showMullSheet<bool>(
-        context,
-        fitContent: true,
-        builder: (sheet) => Padding(
-          padding: const EdgeInsets.fromLTRB(Gutter.text, 30, Gutter.text, 26),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text('Leave ${group.title}?', style: excon(28, tracking: -.02, color: sheet.c.ink)),
-              const SizedBox(height: 10),
-              Text(
-                'It disappears from this phone. Everyone else keeps the group '
-                'and everything in it.',
-                style: ranade(14, height: 1.6, color: sheet.c.ink3),
-              ),
-              const SizedBox(height: 24),
-              PillButton('Leave it', onTap: () => Navigator.of(sheet).pop(true)),
-              const SizedBox(height: 8),
-              SecondaryButton('Stay', onTap: () => Navigator.of(sheet).pop(false)),
-            ],
-          ),
-        ),
-      );
-      if (confirmed != true || !context.mounted) return;
-      if (store.leaveGroup(group)) {
-        HapticFeedback.mediumImpact();
+      final nav = Navigator.of(context);
+      if (await confirmLeaveGroup(context, group)) {
         // Two pops: this screen and the group behind it, both of which are
         // now about a group this phone is no longer in.
-        Navigator.of(context)
+        nav
           ..pop()
           ..pop();
       }
@@ -180,16 +152,8 @@ class GroupMembersScreen extends StatelessWidget {
           const SizedBox(height: 26),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: Gutter.card),
-            child: SecondaryButton(
-              'Leave this group',
-              onTap: cannotLeave == null ? leave : null,
-            ),
+            child: SecondaryButton('Leave this group', onTap: leave),
           ),
-          if (cannotLeave != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(Gutter.text, 12, Gutter.text, 0),
-              child: Text(cannotLeave, style: MullType.caption(c.ink3)),
-            ),
         ],
       ],
     );
@@ -243,9 +207,6 @@ class _MemberRow extends StatelessWidget {
 
     return Pressable(
       onTap: () => showMemberSheet(context, group, member),
-      onLongPress: youAreAdmin && !group.isDirect && !member.isYou
-          ? () => _showMemberActions(context, group, member)
-          : null,
       scale: .985,
       child: Container(
         padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
@@ -337,77 +298,4 @@ class _RoleTag extends StatelessWidget {
       child: Text(label.toUpperCase(), style: eyebrow(c.ink2, size: 9, tracking: .14)),
     );
   }
-}
-
-/// Long-press an admin's options onto a seat.
-Future<void> _showMemberActions(BuildContext context, Group group, Member member) {
-  final store = context.readStore;
-  final lastAdmin = member.isAdmin && group.admins.length < 2;
-  final why = store.whyMemberStays(group, member);
-
-  return showMullSheet(
-    context,
-    fitContent: true,
-    builder: (sheet) {
-      void run(VoidCallback action) {
-        Navigator.of(sheet).pop();
-        Future.delayed(const Duration(milliseconds: 160), action);
-      }
-
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(Gutter.text, 26, Gutter.text, 22),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(member.name, style: MullType.screenTitle(sheet.c.ink), maxLines: 2),
-            const SizedBox(height: 16),
-            CardRows(
-              children: [
-                SheetAction(
-                  'Edit their details',
-                  onTap: () => run(() => showMemberSheet(context, group, member)),
-                ),
-                if (member.isLinked)
-                  SheetAction(
-                    member.isAdmin ? 'Remove as admin' : 'Make an admin',
-                    detail: lastAdmin ? 'last admin' : null,
-                    onTap: () => run(() {
-                      if (store.setAdmin(group, member, !member.isAdmin)) {
-                        HapticFeedback.mediumImpact();
-                        Toast.show(
-                          context,
-                          member.isAdmin
-                              ? '${store.shortName(member)} can run this group'
-                              : '${store.shortName(member)} is no longer an admin',
-                        );
-                      } else {
-                        Toast.show(context, 'A group needs at least one admin');
-                      }
-                    }),
-                  ),
-                SheetAction(
-                  'Remove from group',
-                  destructive: true,
-                  detail: why == null ? null : 'not possible',
-                  onTap: () => run(() {
-                    if (store.removeMember(group, member)) {
-                      HapticFeedback.mediumImpact();
-                      Toast.show(context, 'Removed ${store.shortName(member)}');
-                    } else if (why != null) {
-                      Toast.show(context, why);
-                    }
-                  }),
-                ),
-              ],
-            ),
-            if (why != null) ...[
-              const SizedBox(height: 14),
-              Text(why, style: MullType.caption(sheet.c.ink3)),
-            ],
-          ],
-        ),
-      );
-    },
-  );
 }

@@ -26,6 +26,7 @@ import '../ui/icons.dart';
 import '../ui/page.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
+import 'friends_sheet.dart' show inviteToMull, showAddFriendSheet;
 
 enum _Step { welcome, email, code, name, upi, ready }
 
@@ -57,6 +58,10 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
 
   late _Step _step;
   bool _busy = false;
+
+  /// Whether the last screen has done its job, which turns "Skip for now"
+  /// into "Take me in".
+  bool _reachedOut = false;
   String? _error;
 
   /// Counts down after a code is sent, so "send another" is not an invitation
@@ -218,13 +223,17 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     _goTo(_Step.ready);
   }
 
-  Future<void> _inviteFriends() async {
+  /// Someone already on Mull. A request, the same one the Friends screen
+  /// sends; they accept it and can be put in groups from then on.
+  Future<void> _addFriend() async {
     HapticFeedback.lightImpact();
-    final name = _name.text.trim();
-    await shareOnWhatsApp(
-      '${name.isEmpty ? 'I' : name} started using Mull to keep track of who paid '
-      'for what. Get it and we can split things properly: https://mull.oblunestudio.com',
-    );
+    final sent = await showAddFriendSheet(context);
+    if (sent == true && mounted) setState(() => _reachedOut = true);
+  }
+
+  Future<void> _invite() async {
+    await inviteToMull(context);
+    if (mounted) setState(() => _reachedOut = true);
   }
 
   /// Leaves onboarding for good. Flipping `onboarded` is what the root is
@@ -285,7 +294,8 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
         title: 'Better with people in it.',
         body:
             'Mull works best when the people you actually split with are on '
-            'it too. Invite a couple now, or get on with it and do this later.',
+            'it too. Add the ones already here, invite the rest, or do it later '
+            'from Friends.',
       ),
     };
   }
@@ -358,7 +368,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     _Step.code => (_busy ? 'Checking' : 'Continue', _busy ? null : _verify),
     _Step.name => ('Continue', () => _goTo(_Step.upi, focus: _upiFocus)),
     _Step.upi => (_upi.text.trim().isEmpty ? 'Skip for now' : 'Continue', _finish),
-    _Step.ready => ('Invite friends', _inviteFriends),
+    _Step.ready => ('Add a friend on Mull', _addFriend),
   };
 
   /// Back is only offered where going back is harmless. Once the code has been
@@ -503,7 +513,9 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
                       PillButton(label, busy: busy, onTap: _canAdvance ? action : null),
                       if (_step == _Step.ready) ...[
                         const SizedBox(height: 8),
-                        SecondaryButton('Take me in', onTap: _done),
+                        SecondaryButton('Invite someone to Mull', onTap: _invite),
+                        const SizedBox(height: 8),
+                        SecondaryButton(_reachedOut ? 'Take me in' : 'Skip for now', onTap: _done),
                       ],
                     ],
                   ),

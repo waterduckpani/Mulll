@@ -15,6 +15,7 @@ import '../ui/tokens.dart';
 import '../ui/widgets.dart';
 import 'friends_sheet.dart';
 import 'home_screen.dart' show showHowItWorks;
+import 'upi_picker.dart';
 
 Future<void> showProfileSheet(BuildContext context) =>
     showMullSheet(context, height: 780, builder: (_) => const _ProfileSheet());
@@ -269,45 +270,6 @@ class _ProfileSheetState extends State<_ProfileSheet> {
     await AuthService.saveProfile(upiId: value);
   }
 
-  Future<void> _reset() async {
-    final store = context.readStore;
-    final nav = Navigator.of(context);
-    final ok = await showMullSheet<bool>(
-      context,
-      fitContent: true,
-      builder: (sheet) => Padding(
-        padding: const EdgeInsets.fromLTRB(30, 30, 30, 26),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text('Start over?', style: excon(28, tracking: -.02, color: sheet.c.ink)),
-            const SizedBox(height: 10),
-            Text(
-              Backend.isSignedIn
-                  ? 'Clears this phone. Your groups are kept on your account and come '
-                        'back the next time Mull syncs. To remove your account, use '
-                        'Delete account instead.'
-                  : 'Every group, expense and settlement is erased from this phone.',
-              style: ranade(14, height: 1.6, color: sheet.c.ink3),
-            ),
-            const SizedBox(height: 24),
-            PillButton(
-              Backend.isSignedIn ? 'Clear this phone' : 'Erase everything',
-              onTap: () => Navigator.of(sheet).pop(true),
-            ),
-            const SizedBox(height: 8),
-            SecondaryButton('Cancel', onTap: () => Navigator.of(sheet).pop(false)),
-          ],
-        ),
-      ),
-    );
-    if (ok != true) return;
-    HapticFeedback.heavyImpact();
-    nav.pop();
-    await store.resetAll();
-  }
-
   @override
   Widget build(BuildContext context) {
     final c = context.c;
@@ -340,6 +302,17 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                       label: 'Your UPI ID',
                       value: p.upiId ?? 'Not set',
                       onTap: _editUpi,
+                      trailing: MullIcon(
+                        MullGlyph.chevronRight,
+                        size: 14,
+                        color: c.ink2,
+                        strokeWidth: 1.8,
+                      ),
+                    ),
+                    FieldRow(
+                      label: 'Pay with',
+                      value: UpiApp.byKey(p.payWith)?.label ?? 'Ask me',
+                      onTap: () => chooseUpiApp(context, ask: true),
                       trailing: MullIcon(
                         MullGlyph.chevronRight,
                         size: 14,
@@ -387,8 +360,6 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                   },
                   onChanged: (i) => store.updateProfile((p) => p.theme = ThemeMode.values[[0, 1, 2][i]]),
                 ),
-                const SizedBox(height: 28),
-                SecondaryButton('Start over', onTap: _reset),
               ],
             ),
           ),

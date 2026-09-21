@@ -11,6 +11,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:share_plus/share_plus.dart';
+
+import '../core/links.dart';
+import '../data/remote/backend.dart';
 import '../data/remote/friends_service.dart';
 import '../data/store.dart';
 import '../ui/sheet.dart';
@@ -143,25 +147,6 @@ class _FriendsSheetState extends State<_FriendsSheet> {
     if (sent == true) await _load();
   }
 
-  /// Opens the one-to-one ledger with a friend, making it if it is new.
-  ///
-  /// There was no way to start one from here at all: a direct ledger could
-  /// only be created by going into "start a group" and switching it to one
-  /// person, which is a strange route to "I covered Ritu's cab".
-  void _splitWith(Friend friend) {
-    final store = context.readStore;
-    final group = store.directWith(
-      name: friend.label,
-      userId: friend.userId,
-      email: friend.email,
-      upiId: friend.upiId,
-    );
-    Navigator.of(context).pop();
-    Future.delayed(const Duration(milliseconds: 160), () {
-      if (mounted) openLedger?.call(group.id);
-    });
-  }
-
   Future<void> _act(Future<FriendsResult> Function() action) async {
     if (_busy) return;
     setState(() => _busy = true);
@@ -210,7 +195,6 @@ class _FriendsSheetState extends State<_FriendsSheet> {
                         onAccept: () => _act(() => FriendsService.accept(friend.friendshipId)),
                         onRemove: () => _act(() => FriendsService.remove(friend.friendshipId)),
                         onMore: friend.hasAccount ? () => _more(friend) : null,
-                        onSplit: friend.state == FriendState.friends ? () => _splitWith(friend) : null,
                       ),
                       const SizedBox(height: 4),
                     ],
@@ -240,7 +224,15 @@ class _FriendsSheetState extends State<_FriendsSheet> {
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
-          child: PillButton('Add a friend', onTap: _add),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              PillButton('Add a friend', onTap: _add),
+              const SizedBox(height: 8),
+              SecondaryButton('Invite someone to Mull', onTap: () => inviteToMull(context)),
+            ],
+          ),
         ),
       ],
     );
@@ -254,7 +246,6 @@ class _FriendRow extends StatelessWidget {
     required this.onAccept,
     required this.onRemove,
     this.onMore,
-    this.onSplit,
   });
 
   final Friend friend;
@@ -265,10 +256,6 @@ class _FriendRow extends StatelessWidget {
   /// Remove, report and block, for someone with an account. Null for an
   /// invite nobody has claimed, which keeps a plain Cancel.
   final VoidCallback? onMore;
-
-  /// Open the one-to-one ledger with them. Null until you are actually
-  /// friends — there is nothing to split with a request.
-  final VoidCallback? onSplit;
 
   @override
   Widget build(BuildContext context) {
@@ -286,10 +273,8 @@ class _FriendRow extends StatelessWidget {
       FriendState.friends => (friend.upiId ?? 'No UPI ID on their account yet', null),
     };
 
-    return Pressable(
-      onTap: busy ? null : onSplit,
-      scale: onSplit == null ? 1 : .99,
-      semanticLabel: onSplit == null ? null : 'Split with ${friend.label}',
+    return Semantics(
+      container: true,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 10),
         child: Row(
@@ -374,6 +359,30 @@ class _Empty extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+// ------------------------------------------------------------------ invite
+
+/// Asks someone who is not on Mull yet to join, through whatever they chat on.
+///
+/// The share sheet rather than WhatsApp: it has WhatsApp in it, and also
+/// iMessage and Instagram for the people who do not live in WhatsApp. Your
+/// address goes in the message because that is how they add you once they
+/// are in — Mull has no usernames to search.
+Future<void> inviteToMull(BuildContext context) async {
+  HapticFeedback.lightImpact();
+  final name = context.readStore.profile.name.trim().split(' ').first;
+  final email = Backend.user?.email;
+  final text = [
+    '${name.isEmpty ? 'I' : name} use${name.isEmpty ? '' : 's'} Mull to split bills without the '
+        '"who owes what" chat. Get it here: ${MullLinks.download}',
+    if (email != null && email.isNotEmpty) 'Then add me as a friend: $email',
+  ].join('\n\n');
+  try {
+    await SharePlus.instance.share(ShareParams(text: text));
+  } catch (_) {
+    // No share sheet (tests, the simulator without a host). Nothing to show.
   }
 }
 
