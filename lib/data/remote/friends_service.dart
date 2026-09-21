@@ -72,37 +72,34 @@ class FriendsResult {
 class FriendsService {
   /// Everyone you are connected to, in either direction and at any stage.
   ///
-  /// The two profile embeds are both needed because a friendship does not know
-  /// which side you are on: you might be the requester on one row and the
-  /// addressee on the next, and the person you want to see is always the other
-  /// one.
+  /// A friendship does not know which side you are on: you might be the
+  /// requester on one row and the addressee on the next. friend_list() works
+  /// that out server-side and returns the other person as `other_*`.
   static Future<List<Friend>> list() async {
     final me = Backend.user?.id;
     if (me == null) return const [];
     try {
-      final rows = await Backend.client.from('friendships').select('''
-            id, requester_id, addressee_id, addressee_email, status,
-            requester:requester_id ( id, name, upi_id, email ),
-            addressee:addressee_id ( id, name, upi_id, email )
-          ''');
+      // Through friend_list() rather than an embed of profiles: an email is
+      // only for the two people in a friendship, and a UPI ID only once it is
+      // accepted, and that is a per-row decision no column grant can make.
+      final rows = await Backend.client.rpc('friend_list');
 
       final friends = <Friend>[];
       for (final row in rows as List) {
         final map = row as Map<String, dynamic>;
         final iAsked = map['requester_id'] == me;
-        final other = (iAsked ? map['addressee'] : map['requester']) as Map<String, dynamic>?;
         final accepted = map['status'] == 'accepted';
 
         friends.add(
           Friend(
-            friendshipId: map['id'] as String,
+            friendshipId: map['friendship_id'] as String,
             state: accepted ? FriendState.friends : (iAsked ? FriendState.outgoing : FriendState.incoming),
-            userId: other?['id'] as String?,
+            userId: map['other_id'] as String?,
             // An unclaimed request has no profile to read, so the address it
             // was sent to is all there is to show.
-            email: (other?['email'] as String?) ?? map['addressee_email'] as String?,
-            name: (other?['name'] as String?) ?? '',
-            upiId: other?['upi_id'] as String?,
+            email: (map['other_email'] as String?) ?? map['addressee_email'] as String?,
+            name: (map['other_name'] as String?) ?? '',
+            upiId: map['other_upi_id'] as String?,
           ),
         );
       }

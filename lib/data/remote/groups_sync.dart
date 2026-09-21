@@ -18,12 +18,12 @@ import '../models.dart';
 import '../store.dart';
 import 'auth_service.dart';
 import 'backend.dart';
+import 'live_channel.dart';
 
 class GroupsSync {
   GroupsSync(this._store);
 
   final MullStore _store;
-  RealtimeChannel? _channel;
   Timer? _debounce;
   Timer? _poll;
 
@@ -190,6 +190,13 @@ class GroupsSync {
   }
 
   /// True if the server answered.
+  ///
+  /// Two questions, not one. First the list of groups this account can see
+  /// and each one's revision, which is a few bytes a group; then the full
+  /// contents of only the groups whose revision moved since this phone last
+  /// had them. It used to be every group, whole, on every change anyone made
+  /// and every two minutes besides, which is a year of flat expenses
+  /// downloaded again because somebody added a chai to the Goa trip.
   Future<bool> _pullOnce() async {
     if (!_live) return false;
     final extended = await _hasExtendedSchema();
@@ -198,28 +205,33 @@ class GroupsSync {
     // screen stays as it is until the next try.
     if (extended == null || settlementExtras == null) return false;
     try {
-      final rows = await Backend.client
-          .from('groups')
-          .select('''
-            id, name, created_at${extended ? ', kind, icon' : ''},
-            members ( id, user_id, name, email, phone, upi_id${extended ? ', role' : ''},
-                      account:user_id ( name, upi_id ) ),
-            expenses ( id, description, amount, payer_member_id, method, created_at,
-                       repeats_monthly, spent_on, deleted_at${extended ? ', recurring_id, note' : ''},
-                       expense_shares ( member_id, amount ) )${extended ? ''',
-            recurring_expenses ( id, description, amount, payer_member_id, method,
-                                 frequency, next_due, ends_on, paused, auto_add,
-                                 last_added_on, created_at, deleted_at,
-                                 recurring_shares ( member_id, amount ) )''' : ''},
-            settlements ( id, from_member_id, to_member_id, amount, status,
-                          utr, claimed_at, confirmed_at${settlementExtras ? ', is_offset, deleted_at' : ''} )
-          ''')
-          .isFilter('deleted_at', null)
-          .order('created_at');
+      final revs = await _revisions();
+      if (revs == null) {
+        // A project without the revisions migration: fetch everything, the
+        // way every pull used to.
+        final groups = await _fetch(null, extended: extended, settlementExtras: settlementExtras);
+        _store.replaceGroups(groups, keepLocalSchedules: !extended);
+        return true;
+      }
 
-      final me = Backend.user?.id;
-      final groups = [for (final row in rows as List) _group(row as Map<String, dynamic>, me)];
-      _store.replaceGroups(groups, keepLocalSchedules: !extended);
+      final changed = [
+        for (final e in revs.entries)
+          if (_store.groupById(e.key)?.serverRev != e.value && !_store.pendingGroupDeletes.contains(e.key)) e.key,
+      ];
+      final groups = <Group>[];
+      // In batches, so a first sign-in with a hundred groups does not build a
+      // URL too long for the gateway.
+      for (var i = 0; i < changed.length; i += 40) {
+        final batch = changed.sublist(i, i + 40 > changed.length ? changed.length : i + 40);
+        groups.addAll(await _fetch(batch, extended: extended, settlementExtras: settlementExtras));
+      }
+      // The revision read in the first question, not a newer one. If the group
+      // moved again in between, the next pull sees a mismatch and fetches it
+      // once more; the other way round it would be missed.
+      for (final g in groups) {
+        g.serverRev = revs[g.id];
+      }
+      _store.replaceGroups(groups, keepLocalSchedules: !extended, present: revs.keys.toList());
       return true;
     } catch (e) {
       // A failed pull leaves what is already on screen alone. Blanking the
@@ -227,6 +239,69 @@ class GroupsSync {
       debugPrint('mull: pull failed ($e)');
       return false;
     }
+  }
+
+  /// Every group this account can see, in the server's order, with its
+  /// revision. Null on a project that predates revisions.
+  bool _revisionsMissing = false;
+
+  Future<Map<String, int>?> _revisions() async {
+    if (_revisionsMissing) return null;
+    try {
+      final rows = await Backend.client.rpc('my_group_revs');
+      return {
+        for (final row in rows as List)
+          (row as Map)['group_id'] as String: (row['rev'] as num).toInt(),
+      };
+    } on PostgrestException catch (e) {
+      // PGRST202: no such function. Remembered only for that answer; anything
+      // else is a failed pull, and the next one asks again.
+      if (e.code == 'PGRST202' || e.code == '42883') {
+        _revisionsMissing = true;
+        return null;
+      }
+      rethrow;
+    }
+  }
+
+  /// Groups with everything in them. [ids] null means all of them.
+  ///
+  /// Deleted rows are filtered out on the server rather than skipped here.
+  /// It is less to send, and it is what lets Postgres use the indexes on
+  /// group_id, which cover live rows only.
+  Future<List<Group>> _fetch(
+    List<String>? ids, {
+    required bool extended,
+    required bool settlementExtras,
+  }) async {
+    var query = Backend.client
+        .from('groups')
+        .select('''
+          id, name, created_at${extended ? ', kind, icon' : ''},
+          members ( id, user_id, name, email, phone, upi_id${extended ? ', role' : ''},
+                    account:user_id ( name, upi_id ) ),
+          expenses ( id, description, amount, payer_member_id, method, created_at,
+                     repeats_monthly, spent_on, deleted_at${extended ? ', recurring_id, note' : ''},
+                     expense_shares ( member_id, amount ) )${extended ? ''',
+          recurring_expenses ( id, description, amount, payer_member_id, method,
+                               frequency, next_due, ends_on, paused, auto_add,
+                               last_added_on, created_at, deleted_at,
+                               recurring_shares ( member_id, amount ) )''' : ''},
+          settlements ( id, from_member_id, to_member_id, amount, status,
+                        utr, claimed_at, confirmed_at${settlementExtras ? ', is_offset, deleted_at' : ''} )
+        ''')
+        .isFilter('deleted_at', null)
+        .isFilter('expenses.deleted_at', null);
+    if (extended) query = query.isFilter('recurring_expenses.deleted_at', null);
+    if (settlementExtras) query = query.isFilter('settlements.deleted_at', null);
+    // Named outright, so Postgres looks the groups up by key. Asking for
+    // "every group" and letting RLS decide made it check every group in the
+    // database against this account, one by one.
+    if (ids != null) query = query.inFilter('id', ids);
+
+    final rows = await query.order('created_at');
+    final me = Backend.user?.id;
+    return [for (final row in rows as List) _group(row as Map<String, dynamic>, me)];
   }
 
   /// Instants come back in UTC. Shown as they are, a payment made at 1am in
@@ -657,70 +732,28 @@ class GroupsSync {
 
   // --------------------------------------------------------------- realtime
 
-  /// Re-pulls when anyone else in a group changes something.
+  StreamSubscription<String>? _changes;
+
+  /// Pulls when the server says a group changed, and catches up whenever the
+  /// socket comes back.
   void listen() {
-    if (!_live || _channel != null) return;
-    _channel = Backend.client.channel('mull-groups')
-      ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'expenses', callback: _bump)
-      ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'expense_shares', callback: _bump)
-      ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'settlements', callback: _bump)
-      ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'members', callback: _bump)
-      ..onPostgresChanges(event: PostgresChangeEvent.all, schema: 'public', table: 'groups', callback: _bump)
-      ..onPostgresChanges(
-        event: PostgresChangeEvent.all,
-        schema: 'public',
-        table: 'recurring_expenses',
-        callback: _bump,
-      )
-      // Pulling on every (re)subscribe means a reconnection catches up instead
-      // of resuming mid-stream and missing whatever happened while it was down.
-      ..subscribe((status, error) {
-        switch (status) {
-          case RealtimeSubscribeStatus.subscribed:
-            _retries = 0;
-            _startPolling(_pollWhileLive);
-            unawaited(pull());
-          case RealtimeSubscribeStatus.channelError:
-          case RealtimeSubscribeStatus.timedOut:
-          case RealtimeSubscribeStatus.closed:
-            debugPrint('mull: realtime $status ($error) — polling covers it');
-            _startPolling(_pollWhileDown);
-            _rebuild();
-        }
-      });
-    _startPolling(_pollWhileDown);
+    if (!_live || _changes != null) return;
+    final live = LiveChannel.instance;
+    _changes = live.groupChanged.listen((_) => _bump());
+    live.connected.addListener(_onConnection);
+    live.open();
+    _onConnection();
   }
 
-  /// How many times the socket has been rebuilt without a successful subscribe.
-  int _retries = 0;
-
-  /// Set while [stop] is tearing the channel down on purpose, so the `closed`
-  /// that follows is not mistaken for a failure worth reconnecting from.
-  bool _stopping = false;
-
-  /// Builds the channel again after it failed.
-  ///
-  /// The socket authenticates once, with the token it had when it was built,
-  /// and a token lasts an hour — so a session left open overnight woke to an
-  /// expired token, the subscribe failed, and nothing ever rebuilt it. The new
-  /// channel is created by [listen] with whatever token is current, which is
-  /// the actual repair. Backed off and capped so a tunnel does not spend the
-  /// battery reconnecting.
-  void _rebuild() {
-    if (_stopping || !_live) return;
-    final channel = _channel;
-    _channel = null;
-    if (channel != null) unawaited(Backend.client.removeChannel(channel));
-
-    final wait = Duration(seconds: [2, 5, 15, 30, 60][_retries.clamp(0, 4)]);
-    _retries++;
-    _reconnect?.cancel();
-    _reconnect = Timer(wait, () {
-      if (_live && _channel == null) listen();
-    });
+  void _onConnection() {
+    if (LiveChannel.instance.connected.value) {
+      // Whatever happened while it was down came through nothing.
+      _startPolling(_pollWhileLive);
+      unawaited(pull());
+    } else {
+      _startPolling(_pollWhileDown);
+    }
   }
-
-  Timer? _reconnect;
 
   /// The backstop under realtime. Only runs while the app is in the
   /// foreground, because iOS suspends timers the moment it is not.
@@ -731,9 +764,9 @@ class GroupsSync {
     });
   }
 
-  /// Several rows usually change together — one expense is a row plus a share
-  /// per person — so coalesce them into a single pull.
-  void _bump(PostgresChangePayload _) {
+  /// A push touches several rows in quick succession — an expense, then its
+  /// shares — so coalesce the nudges into a single pull.
+  void _bump() {
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 400), pull);
   }
@@ -746,28 +779,21 @@ class GroupsSync {
   /// schedules that add themselves ran against a copy that was out of date.
   Future<void> resume() async {
     if (!_live) return;
-    if (_channel == null) listen();
+    if (_changes == null) listen();
+    LiveChannel.instance.open();
     await pull();
   }
 
   Future<void> stop() async {
-    _stopping = true;
     _debounce?.cancel();
     _poll?.cancel();
     _poll = null;
-    _reconnect?.cancel();
-    _reconnect = null;
-    _retries = 0;
     for (final t in _pushTimers.values) {
       t.cancel();
     }
     _pushTimers.clear();
-    final channel = _channel;
-    _channel = null;
-    // removeChannel fires `closed` on the way out. Without the flag above,
-    // signing out would schedule a reconnect to a session that no longer
-    // exists.
-    if (channel != null) await Backend.client.removeChannel(channel);
-    _stopping = false;
+    await _changes?.cancel();
+    _changes = null;
+    LiveChannel.instance.connected.removeListener(_onConnection);
   }
 }

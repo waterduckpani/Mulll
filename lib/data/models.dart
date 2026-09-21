@@ -543,6 +543,7 @@ class Group {
     Map<String, String>? acked,
     DateTime? createdAt,
     this.syncedAt,
+    this.serverRev,
   }) : id = id ?? newId(),
        members = members ?? [],
        expenses = expenses ?? [],
@@ -585,6 +586,13 @@ class Group {
   DateTime? syncedAt;
 
   bool get hasReachedServer => syncedAt != null;
+
+  /// The server's revision of this group when this copy was pulled.
+  ///
+  /// The server bumps it on any change to the group or anything in it, so a
+  /// pull only has to fetch the groups whose revision moved. Null until the
+  /// first pull that knew about revisions, which fetches it like any other.
+  int? serverRev;
 
   /// What the server last had for each row, keyed by [printed]'s keys.
   ///
@@ -742,6 +750,7 @@ class Group {
     'acked': acked,
     'createdAt': createdAt.toIso8601String(),
     'syncedAt': syncedAt?.toIso8601String(),
+    'serverRev': serverRev,
   };
 
   factory Group.fromJson(Map<String, dynamic> j) => Group(
@@ -757,6 +766,7 @@ class Group {
     acked: (j['acked'] as Map?)?.cast<String, String>(),
     createdAt: _date(j['createdAt']),
     syncedAt: _date(j['syncedAt']),
+    serverRev: (j['serverRev'] as num?)?.toInt(),
   );
 }
 

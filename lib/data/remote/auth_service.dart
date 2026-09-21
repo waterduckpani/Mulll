@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'backend.dart';
+import 'push_service.dart';
 
 enum AuthStep { enterEmail, enterCode, signedIn }
 
@@ -23,6 +24,18 @@ class AuthResult {
 }
 
 class AuthService {
+  /// The account Apple's reviewers sign in with.
+  ///
+  /// App Review cannot receive a code sent to an address it does not own, so
+  /// this one address skips the email: its "code" is the account's password,
+  /// which lives in the review notes in App Store Connect and nowhere in this
+  /// app. Knowing the address gets you nothing without it. The account holds
+  /// seeded demo groups and shares nothing with anybody real; see
+  /// `tool/review-account.sh`.
+  static const reviewEmail = 'review@mull.oblunestudio.com';
+
+  static bool isReview(String email) => email.trim().toLowerCase() == reviewEmail;
+
   /// Sends a fresh code. Also used to resend.
   static Future<AuthResult> sendCode(String email) async {
     final address = email.trim().toLowerCase();
@@ -30,6 +43,8 @@ class AuthService {
       return const AuthResult.failed("That doesn't look like an email address.");
     }
     if (!Backend.isAvailable) return const AuthResult.failed(_noBackend);
+    // Nothing to send. The code step asks for the review code instead.
+    if (isReview(address)) return const AuthResult.ok();
 
     try {
       await Backend.client.auth.signInWithOtp(email: address, shouldCreateUser: true);
@@ -45,6 +60,7 @@ class AuthService {
   /// Exchanges the code for a session, then claims any seat that was waiting.
   static Future<AuthResult> verify({required String email, required String code}) async {
     if (!Backend.isAvailable) return const AuthResult.failed(_noBackend);
+    if (isReview(email)) return _verifyReview(code);
     final digits = code.replaceAll(RegExp(r'\D'), '');
     if (digits.length < 6) return const AuthResult.failed('The code is six digits.');
 
@@ -127,8 +143,25 @@ class AuthService {
     }
   }
 
+  static Future<AuthResult> _verifyReview(String code) async {
+    try {
+      // Seats are claimed by GroupsSync once the session appears, as below.
+      await Backend.client.auth.signInWithPassword(email: reviewEmail, password: code.trim());
+      return const AuthResult.ok();
+    } on AuthException catch (e) {
+      debugPrint('mull: review sign-in failed (${e.message})');
+      return const AuthResult.failed("That review code didn't match.");
+    } catch (e) {
+      debugPrint('mull: review sign-in failed ($e)');
+      return const AuthResult.failed(_offline);
+    }
+  }
+
   static Future<void> signOut() async {
     if (!Backend.isAvailable) return;
+    // First, while the session can still say whose token this is. A phone
+    // handed back to its owner should not keep buzzing with your ledgers.
+    await PushService.forget();
     try {
       await Backend.client.auth.signOut();
     } catch (e) {

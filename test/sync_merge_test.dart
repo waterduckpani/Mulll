@@ -180,6 +180,74 @@ void main() {
     });
   });
 
+  group('a pull that only fetched what changed', () {
+    late Group goa;
+
+    setUp(() {
+      goa = store.addGroup('Goa', ['Dev']);
+      pushed(store, goa);
+    });
+
+    test('a group the server still lists but did not send is kept as it is', () {
+      final flatServer = serverCopy(current(), edit: (g) => g.expenses.single.description = 'Rent, October');
+
+      // Only the flat changed; Goa is listed and not fetched.
+      store.replaceGroups([flatServer], present: [flat.id, goa.id]);
+
+      expect(store.groupById(goa.id), isNotNull, reason: 'unchanged is not deleted');
+      expect(current().expenses.single.description, 'Rent, October');
+    });
+
+    test('an unsent edit in a group that was not fetched is left alone', () {
+      store.addExpense(goa, description: 'Scooter', amount: 800, payerId: goa.you!.id, shares: {goa.you!.id: 800});
+
+      store.replaceGroups(const [], present: [flat.id, goa.id]);
+
+      expect(store.groupById(goa.id)!.expenses.map((e) => e.description), ['Scooter']);
+    });
+
+    test('a group the server no longer lists goes, as with a full pull', () {
+      store.replaceGroups(const [], present: [flat.id]);
+
+      expect(store.groupById(goa.id), isNull);
+      expect(store.groupById(flat.id), isNotNull);
+    });
+
+    test('a group made here and never sent survives not being listed', () {
+      final fresh = store.addGroup('New', ['Dev']);
+
+      store.replaceGroups(const [], present: [flat.id, goa.id]);
+
+      expect(store.groupById(fresh.id), isNotNull);
+    });
+
+    test('the listed order is kept, with unsent groups after it', () {
+      final fresh = store.addGroup('New', ['Dev']);
+
+      store.replaceGroups(const [], present: [goa.id, flat.id]);
+
+      expect(store.groups.map((g) => g.id), [goa.id, flat.id, fresh.id]);
+    });
+
+    test('a group deleted here is not brought back by being listed', () {
+      store.deleteGroup(goa);
+
+      store.replaceGroups(const [], present: [flat.id, goa.id]);
+
+      expect(store.groupById(goa.id), isNull);
+    });
+
+    test('the revision it was fetched at is kept, and survives a restart', () {
+      final server = serverCopy(current())..serverRev = 7;
+
+      store.replaceGroups([server], present: [flat.id, goa.id]);
+
+      expect(current().serverRev, 7);
+      final reloaded = Group.fromJson(jsonDecode(jsonEncode(current().toJson())) as Map<String, dynamic>);
+      expect(reloaded.serverRev, 7);
+    });
+  });
+
   test('only an admin can delete a group', () {
     final g = current();
     g.you!.role = MemberRole.member;

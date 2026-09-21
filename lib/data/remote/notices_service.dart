@@ -10,10 +10,10 @@
 /// into somebody's inbox; and a reminder is counted, twice a day per pair, so
 /// the cap is not something a reinstall clears.
 ///
-/// What this is *not* is push. There are no device tokens here and nothing
-/// reaches a locked phone: a notice arrives while Mull is open, or it is
-/// waiting in the inbox the next time it is. Adding APNs later means an edge
-/// function reading this same table, not a different shape of data.
+/// A notice reaches an open app over the live channel, and a locked phone
+/// through the `push` edge function, which the database calls for every new
+/// row (see [PushService] and `supabase/functions/push`). Same table either
+/// way; push is a second delivery, not a different kind of notice.
 library;
 
 import 'package:flutter/foundation.dart';

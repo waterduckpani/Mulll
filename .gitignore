@@ -53,3 +53,6 @@ app.*.map.json
 
 # Editor/tool backups
 *.bak
+
+# Credentials made by tool/review-account.sh
+/.secrets/

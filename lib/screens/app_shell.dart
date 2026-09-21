@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/money.dart';
 import '../data/notices.dart';
+import '../data/remote/push_service.dart';
 import '../data/store.dart';
 import '../ui/sheet.dart';
 import '../ui/tokens.dart';
@@ -32,8 +33,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    PushService.opened.addListener(_openInbox);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_announceAutoAdded());
+      // Here, not in onboarding: the question makes sense with the ledgers on
+      // screen behind it, and someone who has just finished setting up has
+      // seen what the notifications would be about.
+      unawaited(PushService.ensure());
+      // A tap that launched the app landed before this screen existed.
+      if (PushService.opened.value > 0) _openInbox();
     });
   }
 
@@ -67,8 +75,16 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     );
   }
 
+  /// A notification was tapped. It is about something in the inbox, and the
+  /// inbox is where each notice says what happened and where.
+  void _openInbox() {
+    if (!mounted || SheetDepth.value.value > 0) return;
+    showNoticesSheet(context, into: _navigator.currentState);
+  }
+
   @override
   void dispose() {
+    PushService.opened.removeListener(_openInbox);
     _inbox?.arrived.removeListener(_onNoticeArrived);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();

@@ -74,6 +74,10 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   /// screenshot tour both used to dead-end.
   bool get _localOnly => !BackendConfig.isConfigured;
 
+  /// App Review's address: its code is a password from the review notes, not
+  /// six digits from an email. See [AuthService.reviewEmail].
+  bool get _review => AuthService.isReview(_email.text);
+
   @override
   void initState() {
     super.initState();
@@ -99,7 +103,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   }
 
   void _autoVerify() {
-    if (_step != _Step.code || _busy) return;
+    if (_step != _Step.code || _busy || _review) return;
     if (_code.text.replaceAll(RegExp(r'\D'), '').length == 6) _verify();
   }
 
@@ -142,7 +146,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       _error = result.error;
     });
     if (!result.isOk) return;
-    _startCooldown();
+    if (!_review) _startCooldown();
     if (resend) {
       HapticFeedback.lightImpact();
       _code.clear();
@@ -250,6 +254,11 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
             : 'We send a six-digit code, so there is no password to remember. '
                   'This is also the address friends use to add you to a group.',
       ),
+      _Step.code when _review => (
+        eyebrow: '$n of $of',
+        title: 'Enter the review code.',
+        body: 'This address is for App Review. The code is in the review notes.',
+      ),
       _Step.code => (
         eyebrow: '$n of $of',
         title: 'Check your email.',
@@ -292,9 +301,9 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     _Step.code => BigField(
       controller: _code,
       focusNode: _codeFocus,
-      numeric: true,
-      size: 34,
-      hint: '000000',
+      numeric: !_review,
+      size: _review ? 24 : 34,
+      hint: _review ? 'Review code' : '000000',
       onSubmitted: (_) => _canAdvance && !_busy ? _verify() : null,
     ),
     _Step.name => BigField(
@@ -321,7 +330,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   bool get _canAdvance => switch (_step) {
     _Step.welcome || _Step.ready => true,
     _Step.email => _email.text.trim().isNotEmpty,
-    _Step.code => _code.text.replaceAll(RegExp(r'\D'), '').length >= 6,
+    _Step.code => _review ? _code.text.trim().length >= 8 : _code.text.replaceAll(RegExp(r'\D'), '').length >= 6,
     _Step.name => _name.text.trim().isNotEmpty,
     // Deliberately skippable: a UPI ID is not something everyone has to hand,
     // and blocking setup on it would lose people over a string they can paste
@@ -402,11 +411,13 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
                 const SizedBox(height: 20),
                 Row(
                   children: [
-                    _TextLink(
-                      _resendIn > 0 ? 'Send another in ${_resendIn}s' : 'Send another code',
-                      onTap: _resendIn > 0 || busy ? null : () => _sendCode(resend: true),
-                    ),
-                    const SizedBox(width: 20),
+                    if (!_review) ...[
+                      _TextLink(
+                        _resendIn > 0 ? 'Send another in ${_resendIn}s' : 'Send another code',
+                        onTap: _resendIn > 0 || busy ? null : () => _sendCode(resend: true),
+                      ),
+                      const SizedBox(width: 20),
+                    ],
                     _TextLink(
                       'Use a different email',
                       onTap: busy ? null : () => _goTo(_Step.email, focus: _emailFocus),

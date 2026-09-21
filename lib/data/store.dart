@@ -115,23 +115,33 @@ class MullStore extends ChangeNotifier {
   /// [keepLocalSchedules] is for a project that has not had the recurring
   /// migration applied: the server cannot carry schedules, so an answer with
   /// none means "this server does not do schedules", not "they were deleted".
-  void replaceGroups(List<Group> incoming, {bool keepLocalSchedules = false}) {
+  ///
+  /// [present] is every group the server still has for this account, in its
+  /// order, when [incoming] is only the ones that changed. A group in
+  /// [present] and not in [incoming] is current here and is kept exactly as it
+  /// is. Left out, [incoming] is taken to be everything, which is what a full
+  /// pull sends.
+  void replaceGroups(List<Group> incoming, {bool keepLocalSchedules = false, List<String>? present}) {
     final held = {for (final g in groups) g.id: g};
+    final fetched = {for (final g in incoming) g.id: g};
+    final order = present ?? [for (final g in incoming) g.id];
+    final alive = order.toSet();
 
     // A group the server has never acknowledged survives a pull it is missing
     // from: the push has not landed yet, or failed. A group it *has* seen and
-    // no longer returns was deleted, or you left it.
+    // no longer lists was deleted, or you left it.
     final unsynced = [
       for (final g in groups)
-        if (!g.hasReachedServer && !incoming.any((i) => i.id == g.id)) g,
+        if (!g.hasReachedServer && !alive.contains(g.id)) g,
     ];
 
     final merged = <Group>[
-      for (final server in incoming)
-        if (!pendingGroupDeletes.contains(server.id))
-          held[server.id] == null
-              ? server
-              : _merge(held[server.id]!, server, keepLocalSchedules: keepLocalSchedules),
+      for (final id in order)
+        if (!pendingGroupDeletes.contains(id))
+          if (fetched[id] case final server?)
+            held[id] == null ? server : _merge(held[id]!, server, keepLocalSchedules: keepLocalSchedules)
+          else
+            ?held[id],
     ];
 
     groups
@@ -218,6 +228,7 @@ class MullStore extends ChangeNotifier {
       acked: acked,
       createdAt: server.createdAt,
       syncedAt: server.syncedAt,
+      serverRev: server.serverRev,
     );
   }
 

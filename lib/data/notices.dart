@@ -12,13 +12,15 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'remote/backend.dart';
+import 'remote/live_channel.dart';
+import 'remote/push_service.dart';
 import 'remote/notices_service.dart';
 import 'store.dart';
 
 class NoticesInbox extends ChangeNotifier {
   final List<Notified> _all = [];
-  RealtimeChannel? _channel;
   StreamSubscription<AuthState>? _auth;
+  StreamSubscription<Map<String, dynamic>>? _live;
   bool _loading = false;
 
   List<Notified> get all => List.unmodifiable(_all);
@@ -35,20 +37,51 @@ class NoticesInbox extends ChangeNotifier {
 
   void start() {
     if (!Backend.isAvailable) return;
+    final channel = LiveChannel.instance;
+    // Only this account's notices ever reach its topic, so there is nothing
+    // to filter here: the server sends a notice to its recipient and no one
+    // else can join.
+    _live = channel.notices.listen(_onNotice);
+    // The icon's badge is the unread count, kept here so it is right the
+    // moment the inbox is opened, not at the next push.
+    addListener(_syncBadge);
+    channel.connected.addListener(_onConnection);
     _auth = Backend.client.auth.onAuthStateChange.listen((state) async {
       if (state.session != null) {
         await refresh();
-        _listen();
       } else {
         _all.clear();
         notifyListeners();
-        await _stop();
       }
     });
-    if (Backend.isSignedIn) {
-      unawaited(refresh());
-      _listen();
+    if (Backend.isSignedIn) unawaited(refresh());
+  }
+
+  void _onNotice(Map<String, dynamic> row) {
+    final Notified notice;
+    try {
+      notice = Notified.fromRow(row);
+    } catch (e) {
+      debugPrint('mull: unreadable notice ($e)');
+      return;
     }
+    if (_all.any((n) => n.id == notice.id)) return;
+    _all.insert(0, notice);
+    arrived.value = notice;
+    notifyListeners();
+  }
+
+  int? _badge;
+
+  void _syncBadge() {
+    if (_badge == unread) return;
+    _badge = unread;
+    unawaited(PushService.setBadge(unread));
+  }
+
+  /// Whatever landed while the socket was down came through nothing.
+  void _onConnection() {
+    if (LiveChannel.instance.connected.value) unawaited(refresh());
   }
 
   Future<void> refresh() async {
@@ -60,67 +93,6 @@ class NoticesInbox extends ChangeNotifier {
       ..clear()
       ..addAll(fetched);
     notifyListeners();
-  }
-
-  /// Subscribed to this account's rows only.
-  ///
-  /// The filter is a courtesy, not the protection: RLS already means the socket
-  /// never carries anyone else's notices. It is here so the server does not
-  /// bother evaluating rows that were never going to arrive.
-  void _listen() {
-    final me = Backend.user?.id;
-    if (me == null || _channel != null) return;
-    _channel = Backend.client.channel('mull-notices-$me')
-      ..onPostgresChanges(
-        event: PostgresChangeEvent.insert,
-        schema: 'public',
-        table: 'notices',
-        filter: PostgresChangeFilter(
-          type: PostgresChangeFilterType.eq,
-          column: 'recipient_id',
-          value: me,
-        ),
-        callback: (payload) {
-          final notice = Notified.fromRow(payload.newRecord);
-          if (_all.any((n) => n.id == notice.id)) return;
-          _all.insert(0, notice);
-          arrived.value = notice;
-          notifyListeners();
-        },
-      )
-      ..subscribe((status, error) {
-        switch (status) {
-          case RealtimeSubscribeStatus.subscribed:
-            _retries = 0;
-            // Whatever landed while the socket was down came through nothing.
-            unawaited(refresh());
-          case RealtimeSubscribeStatus.channelError:
-          case RealtimeSubscribeStatus.timedOut:
-          case RealtimeSubscribeStatus.closed:
-            _rebuild();
-        }
-      });
-  }
-
-  /// The same repair [GroupsSync] makes, for the same reason: a socket
-  /// authenticates once, the token lasts an hour, and a subscribe that failed
-  /// on an expired one was never tried again — so live banners stopped for the
-  /// rest of the session and nothing said so.
-  int _retries = 0;
-  bool _stopping = false;
-  Timer? _reconnect;
-
-  void _rebuild() {
-    if (_stopping || !Backend.isSignedIn) return;
-    final channel = _channel;
-    _channel = null;
-    if (channel != null) unawaited(Backend.client.removeChannel(channel));
-    final wait = Duration(seconds: [2, 5, 15, 30, 60][_retries.clamp(0, 4)]);
-    _retries++;
-    _reconnect?.cancel();
-    _reconnect = Timer(wait, () {
-      if (Backend.isSignedIn && _channel == null) _listen();
-    });
   }
 
   /// Called when the inbox is opened. Marks what is on screen as seen — both
@@ -148,21 +120,11 @@ class NoticesInbox extends ChangeNotifier {
     await NoticesService.markRead(ids);
   }
 
-  Future<void> _stop() async {
-    _stopping = true;
-    _reconnect?.cancel();
-    _reconnect = null;
-    _retries = 0;
-    final channel = _channel;
-    _channel = null;
-    if (channel != null) await Backend.client.removeChannel(channel);
-    _stopping = false;
-  }
-
   @override
   void dispose() {
     unawaited(_auth?.cancel());
-    unawaited(_stop());
+    unawaited(_live?.cancel());
+    LiveChannel.instance.connected.removeListener(_onConnection);
     arrived.dispose();
     super.dispose();
   }
