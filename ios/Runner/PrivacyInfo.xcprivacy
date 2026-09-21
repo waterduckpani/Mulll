@@ -7,7 +7,8 @@
 
   Email, name, UPI ID (other financial info), phone numbers typed in to
   invite someone, and the ledger itself (other user content) are linked to the account, because they are the account.
-  Crash reports are not linked: Sentry is sent no user id.
+  Crash reports are not linked: error_reports stores no account id, and
+  emails and ids are scrubbed out of what it does store.
 
   Nothing is used for tracking and there are no tracking domains. The app's
   own code uses none of the required-reason APIs; Flutter and each plugin

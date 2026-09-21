@@ -17,7 +17,7 @@ Apple scales them down for smaller iPhones, so no other sizes are needed.
 | Content rights | Does not contain third-party content |
 | Copyright | 2026 Dilip Khanna |
 | Price | Free |
-| Availability | India first (add more countries later if you want) |
+| Availability | **India only** (Pricing and Availability → deselect all, tick India) |
 
 ## URLs
 
@@ -73,7 +73,7 @@ First release.
 Answer **None / No** to every question. Result: **4+**.
 
 - Unrestricted web access: No (links open only Mull's own pages).
-- User-generated content: **No.** Expense names are seen only by people you chose to share a group with, and nothing is public or discoverable. If Apple asks, that is the explanation. If they insist it counts, the answer becomes Yes and Mull needs a way to block people and report content, which it doesn't have yet.
+- User-generated content: **Yes, to be safe.** Expense names and notes are seen by the people you share a group with. Apple's rule for this (guideline 1.2) wants a way to report and block people, and Mull has both: Friends → ··· → Report / Block. Reports land in the `reports` table; during review and after launch, check it daily (Supabase → Table editor → reports, status = open) and act within 24 hours.
 - Messaging and chat: No (reminders are fixed, app-written messages).
 - Gambling, contests, medical info and so on: No.
 
@@ -109,6 +109,8 @@ Notes (paste):
 > Mull never processes payments. "Pay" opens the device's UPI app (Google Pay, PhonePe and so on) with the details filled in, and the payment happens there. The demo people's UPI IDs end in @example, which no bank issues, so nothing can actually be paid.
 >
 > Account deletion: profile (top right) → Delete account.
+>
+> Reporting and blocking: Friends (the people icon, top right) → ··· next to a person → Report or Block. Reports go to our moderation queue, and we review them within 24 hours.
 
 ## TestFlight
 

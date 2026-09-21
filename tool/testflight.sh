@@ -12,7 +12,8 @@
 # never collide. Commit before running: the same commit cannot be uploaded
 # twice.
 #
-# Crash reports are sent to Sentry when .secrets/sentry-dsn holds a DSN.
+# Errors from this build land in the error_reports table, tagged with its
+# version and build number.
 
 set -e
 cd "$(dirname "$0")/.."
@@ -24,15 +25,13 @@ fi
 
 BUILD=$(git rev-list --count HEAD)
 VERSION=$(sed -n 's/^version: \([0-9.]*\).*/\1/p' pubspec.yaml)
-DSN=$(cat .secrets/sentry-dsn 2>/dev/null || true)
-[ -z "$DSN" ] && echo "Note: no .secrets/sentry-dsn, so this build will not report crashes."
 
 echo "Building Mull $VERSION ($BUILD)"
 flutter build ipa --release \
   --build-name="$VERSION" --build-number="$BUILD" \
   --dart-define=SUPABASE_URL=https://nfuujjyscybqdcfryiwk.supabase.co \
   --dart-define=SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mdXVqanlzY3licWRjZnJ5aXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk1NjkzNDcsImV4cCI6MjEwNTE0NTM0N30.TVpPThLe_P5LVgbwa_QnRBlfyIXcJli95cFM7NBvh2M \
-  ${DSN:+--dart-define=SENTRY_DSN=$DSN}
+  --dart-define="MULL_BUILD=$VERSION ($BUILD)"
 
 # Never ship the sample data: it is not in this build unless MULL_SAMPLE is
 # defined, and it is not, above. Said here because it has leaked before.

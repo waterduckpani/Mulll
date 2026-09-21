@@ -42,6 +42,7 @@ class _FriendsSheetState extends State<_FriendsSheet> {
   void Function(String groupId)? get openLedger => widget.onOpenLedger;
 
   List<Friend>? _friends;
+  List<({String userId, String name})> _blocked = const [];
   bool _busy = false;
 
   @override
@@ -51,8 +52,90 @@ class _FriendsSheetState extends State<_FriendsSheet> {
   }
 
   Future<void> _load() async {
-    final friends = await FriendsService.list();
-    if (mounted) setState(() => _friends = friends);
+    final (friends, blocked) = await (FriendsService.list(), FriendsService.blocked()).wait;
+    if (mounted) {
+      setState(() {
+        _friends = friends;
+        _blocked = blocked;
+      });
+    }
+  }
+
+  /// Remove, report or block. Only for someone with an account: an invite to
+  /// an address nobody has signed up with has nobody behind it to report.
+  Future<void> _more(Friend friend) async {
+    final userId = friend.userId;
+    final removeLabel = switch (friend.state) {
+      FriendState.friends => 'Remove friend',
+      FriendState.incoming => 'Decline',
+      FriendState.outgoing => 'Cancel request',
+    };
+    final choice = await showMullSheet<String>(
+      context,
+      fitContent: true,
+      builder: (sheet) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 26, 20, 26),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 18),
+              child: Text(friend.label, style: excon(26, tracking: -.02, color: sheet.c.ink)),
+            ),
+            SecondaryButton(removeLabel, onTap: () => Navigator.of(sheet).pop('remove')),
+            if (userId != null) ...[
+              const SizedBox(height: 8),
+              SecondaryButton('Report', onTap: () => Navigator.of(sheet).pop('report')),
+              const SizedBox(height: 8),
+              SecondaryButton('Block', onTap: () => Navigator.of(sheet).pop('block')),
+            ],
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case 'remove':
+        await _act(() => FriendsService.remove(friend.friendshipId));
+      case 'report' when userId != null:
+        final sent = await showReportSheet(context, name: friend.label, userId: userId);
+        if (sent == true) {
+          if (mounted) Toast.show(context, 'Thanks. We will look at it.');
+          await _load();
+        }
+      case 'block' when userId != null:
+        if (await _confirmBlock(friend.label)) await _act(() => FriendsService.block(userId));
+    }
+  }
+
+  Future<bool> _confirmBlock(String name) async {
+    final ok = await showMullSheet<bool>(
+      context,
+      fitContent: true,
+      builder: (sheet) => Padding(
+        padding: const EdgeInsets.fromLTRB(30, 30, 30, 26),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Block $name?', style: excon(28, tracking: -.02, color: sheet.c.ink)),
+            const SizedBox(height: 10),
+            Text(
+              'They will not be able to send you friend requests, reminders or '
+              'notifications, and they will not be told. Groups you already share '
+              'stay, because they are everyone\'s records. You can leave those.',
+              style: ranade(14, height: 1.6, color: sheet.c.ink3),
+            ),
+            const SizedBox(height: 24),
+            PillButton('Block', onTap: () => Navigator.of(sheet).pop(true)),
+            const SizedBox(height: 8),
+            SecondaryButton('Cancel', onTap: () => Navigator.of(sheet).pop(false)),
+          ],
+        ),
+      ),
+    );
+    return ok == true;
   }
 
   Future<void> _add() async {
@@ -108,7 +191,7 @@ class _FriendsSheetState extends State<_FriendsSheet> {
         Expanded(
           child: friends == null
               ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
-              : friends.isEmpty
+              : friends.isEmpty && _blocked.isEmpty
               ? _Empty(onAdd: _add)
               : ListView(
                   physics: const BouncingScrollPhysics(),
@@ -126,9 +209,31 @@ class _FriendsSheetState extends State<_FriendsSheet> {
                         busy: _busy,
                         onAccept: () => _act(() => FriendsService.accept(friend.friendshipId)),
                         onRemove: () => _act(() => FriendsService.remove(friend.friendshipId)),
+                        onMore: friend.hasAccount ? () => _more(friend) : null,
                         onSplit: friend.state == FriendState.friends ? () => _splitWith(friend) : null,
                       ),
                       const SizedBox(height: 4),
+                    ],
+                    if (_blocked.isNotEmpty) ...[
+                      const SizedBox(height: 28),
+                      const Eyebrow('Blocked'),
+                      const SizedBox(height: 8),
+                      for (final b in _blocked)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          child: Row(
+                            children: [
+                              Expanded(child: Text(b.name, style: ranade(15, color: c.ink2))),
+                              Pressable(
+                                onTap: _busy ? null : () => _act(() => FriendsService.unblock(b.userId)),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(6),
+                                  child: Text('Unblock', style: ranade(12.5, color: c.ink3)),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ],
                 ),
@@ -148,6 +253,7 @@ class _FriendRow extends StatelessWidget {
     required this.busy,
     required this.onAccept,
     required this.onRemove,
+    this.onMore,
     this.onSplit,
   });
 
@@ -155,6 +261,10 @@ class _FriendRow extends StatelessWidget {
   final bool busy;
   final VoidCallback onAccept;
   final VoidCallback onRemove;
+
+  /// Remove, report and block, for someone with an account. Null for an
+  /// invite nobody has claimed, which keeps a plain Cancel.
+  final VoidCallback? onMore;
 
   /// Open the one-to-one ledger with them. Null until you are actually
   /// friends — there is nothing to split with a request.
@@ -214,16 +324,23 @@ class _FriendRow extends StatelessWidget {
               ChipButton(action, onTap: busy ? null : onAccept),
               const SizedBox(width: 8),
             ],
-            Pressable(
-              onTap: busy ? null : onRemove,
-              child: Padding(
-                padding: const EdgeInsets.all(6),
-                child: Text(
-                  friend.state == FriendState.friends ? 'Remove' : 'Cancel',
-                  style: ranade(12.5, color: c.ink3),
+            if (onMore != null)
+              Pressable(
+                onTap: busy ? null : onMore,
+                semanticLabel: 'More for ${friend.label}',
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 6, 2, 6),
+                  child: Icon(Icons.more_horiz, size: 22, color: c.ink3),
+                ),
+              )
+            else
+              Pressable(
+                onTap: busy ? null : onRemove,
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: Text('Cancel', style: ranade(12.5, color: c.ink3)),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -514,6 +631,140 @@ class _FriendPickerState extends State<_FriendPicker> {
                 : () => Navigator.of(context).pop(
                     available!.where((f) => _picked.contains(f.userId)).toList(),
                   ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+
+/// Why someone is being reported, and whether to block them too.
+Future<bool?> showReportSheet(BuildContext context, {required String name, required String userId}) =>
+    showMullSheet<bool>(context, height: 640, builder: (_) => _ReportSheet(name: name, userId: userId));
+
+class _ReportSheet extends StatefulWidget {
+  const _ReportSheet({required this.name, required this.userId});
+
+  final String name;
+  final String userId;
+
+  @override
+  State<_ReportSheet> createState() => _ReportSheetState();
+}
+
+class _ReportSheetState extends State<_ReportSheet> {
+  static const _reasons = [
+    ('spam', 'Spam or a scam'),
+    ('harassment', 'Harassing or threatening me'),
+    ('impersonation', 'Pretending to be someone else'),
+    ('other', 'Something else'),
+  ];
+
+  final _note = TextEditingController();
+  String? _reason;
+  bool _alsoBlock = true;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _send() async {
+    final reason = _reason;
+    if (reason == null || _busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    final result = await FriendsService.report(
+      widget.userId,
+      reason: reason,
+      note: _note.text,
+      alsoBlock: _alsoBlock,
+    );
+    if (!mounted) return;
+    if (result.isOk) {
+      HapticFeedback.mediumImpact();
+      Navigator.of(context).pop(true);
+    } else {
+      setState(() {
+        _busy = false;
+        _error = result.error;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.c;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SheetHeader('Report ${widget.name}'),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(30, 4, 30, 16),
+            children: [
+              Text(
+                'Reports go to the people who run Mull, not to ${widget.name}. We read every one.',
+                style: ranade(13, height: 1.6, color: c.ink3),
+              ),
+              const SizedBox(height: 16),
+              for (final (key, label) in _reasons)
+                Pressable(
+                  onTap: () => setState(() => _reason = key),
+                  scale: .99,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(label, style: ranade(15, color: c.ink))),
+                        if (_reason == key) Icon(Icons.check, size: 20, color: c.ink),
+                      ],
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _note,
+                maxLength: 500,
+                maxLines: 3,
+                minLines: 2,
+                style: ranade(14, color: c.ink),
+                cursorColor: c.ink,
+                decoration: InputDecoration(
+                  hintText: 'Anything that would help (optional)',
+                  hintStyle: ranade(14, color: c.ink3),
+                  border: InputBorder.none,
+                  counterStyle: ranade(11, color: c.ink3),
+                ),
+              ),
+              Row(
+                children: [
+                  Expanded(child: Text('Block them as well', style: ranade(15, color: c.ink))),
+                  Switch.adaptive(
+                    value: _alsoBlock,
+                    activeTrackColor: c.ink,
+                    onChanged: (v) => setState(() => _alsoBlock = v),
+                  ),
+                ],
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Text(_error!, style: ranade(13, color: c.ink2)),
+              ],
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 30),
+          child: PillButton(
+            _busy ? 'Sending' : 'Send report',
+            onTap: _reason == null || _busy ? null : _send,
           ),
         ),
       ],

@@ -1,13 +1,12 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show AuthState;
 
 import 'data/remote/auth_service.dart';
 import 'data/remote/backend.dart';
+import 'data/remote/error_reporter.dart';
 import 'data/remote/groups_sync.dart';
 import 'data/remote/live_channel.dart';
 import 'data/remote/push_service.dart';
@@ -18,28 +17,7 @@ import 'screens/app_shell.dart';
 import 'screens/not_configured_screen.dart';
 import 'ui/tokens.dart';
 
-/// Where crash and error reports go. Passed at build time like the Supabase
-/// keys; a build without it reports nothing and runs exactly the same.
-const _sentryDsn = String.fromEnvironment('SENTRY_DSN');
-
 Future<void> main() async {
-  if (_sentryDsn.isEmpty) return _start();
-  await SentryFlutter.init((o) {
-    o.dsn = _sentryDsn;
-    o.environment = kReleaseMode ? 'release' : 'debug';
-    // Errors only. No performance tracing, no replays, no screenshots: a
-    // screenshot of Mull is a screenshot of somebody's money.
-    o.tracesSampleRate = 0;
-    o.attachScreenshot = false;
-    o.sendDefaultPii = false;
-    // Log lines name accounts and groups, and request URLs carry filters with
-    // ids in them. Neither is needed to read a stack trace.
-    o.enablePrintBreadcrumbs = false;
-    o.beforeBreadcrumb = (crumb, hint) => crumb?.category == 'http' ? null : crumb;
-  }, appRunner: _start);
-}
-
-Future<void> _start() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
@@ -50,6 +28,7 @@ Future<void> _start() async {
   if (const bool.fromEnvironment('MULL_SAMPLE') && store.groups.isEmpty) store.loadSample();
 
   await Backend.init();
+  ErrorReporter.install();
   LiveChannel.instance.start();
   PushService.start();
   final sync = GroupsSync(store)

@@ -1,0 +1,28 @@
+# Keeps the free Supabase project awake.
+#
+# A free project with no requests for seven days is paused, and a paused
+# project is every tester's app failing to sync until someone clicks
+# "Restore" in the dashboard. One small request a day is enough activity.
+# keepalive() returns 'ok' and touches nothing.
+#
+# The key here is the public anon key, the same one inside the app. It can
+# call keepalive() and report_error() and nothing else.
+#
+# Remove this once the project is on a paid plan, which never pauses.
+
+name: Keep Supabase awake
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          curl -sf -X POST "https://nfuujjyscybqdcfryiwk.supabase.co/rest/v1/rpc/keepalive" \
+            -H "apikey: $KEY" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{}'
+        env:
+          KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mdXVqanlzY3licWRjZnJ5aXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk1NjkzNDcsImV4cCI6MjEwNTE0NTM0N30.TVpPThLe_P5LVgbwa_QnRBlfyIXcJli95cFM7NBvh2M

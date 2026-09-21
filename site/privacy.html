@@ -25,6 +25,7 @@
   <li>We collect your email, your name, your UPI ID if you add one, and the groups and expenses you put in.</li>
   <li>People in a group with you see your name, your UPI ID and your shares. Your email is only seen by friends you connect with. Your phone number is never shown to anyone.</li>
   <li>Mull never touches your money. Payments happen in your own UPI app, and we never see your bank details.</li>
+  <li>Everything is stored in India, in Mumbai.</li>
   <li>No ads, no tracking, no selling your data. Ever.</li>
   <li>You can delete your account from inside the app at any time.</li>
 </ul>
@@ -49,7 +50,7 @@
 <h3>From your phone</h3>
 <ul>
   <li><strong>A notification token</strong>, if you allow notifications, so we can tell you when someone pays you or adds an expense. It identifies the app on your phone, not you.</li>
-  <li><strong>Crash reports</strong>: when the app hits an error, a report of what went wrong in the code. These are not linked to your account and contain no screenshots.</li>
+  <li><strong>Error reports</strong>: when the app hits an error, a note of what went wrong in the code, the app version and your iOS version. These are not linked to your account, and email addresses and account ids are removed from them before they are stored.</li>
 </ul>
 <h3>What we do not collect</h3>
 <p>Your contacts, your location, your photos, your bank or card details, your UPI PIN, or anything about what you do in other apps. Mull has no advertising and no analytics that follow you around.</p>
@@ -66,25 +67,28 @@
 </table>
 <p>These rules are enforced by the database itself, not only by the app. We (the people who run Mull) can access the database to keep it running and to fix problems. We do not look at your data otherwise, and access is limited and protected by two-factor authentication.</p>
 
+<h2>Reporting and blocking</h2>
+<p>You can report or block anyone you are connected to, from Friends. A report, with the reason and any note you add, goes only to the people who run Mull; the person you report is not told. Blocking stops their friend requests, reminders and notifications reaching you, and they are not told either.</p>
+
 <h2>Why we use it</h2>
 <p>Only to run Mull: signing you in, keeping your groups in sync between your phones and the people you split with, telling you when something needs your attention, and fixing bugs. We do not use your data for advertising, and we do not sell it or share it with anyone for their own purposes.</p>
 
-<h2>Services we use</h2>
-<p>A few companies process data on our behalf, only to provide Mull:</p>
+<h2>Where your data lives</h2>
+<p>Your account, your ledgers, your notifications and error reports are all stored in one database in <strong>Mumbai, India</strong>. A few companies process data on our behalf, only to provide Mull:</p>
 <table>
   <tr><th>Service</th><th>What for</th><th>Where</th></tr>
-  <tr><td>Supabase</td><td>Database and sign-in</td><td>Mumbai, India</td></tr>
-  <tr><td>Resend</td><td>Sending your sign-in code by email</td><td>United States</td></tr>
-  <tr><td>Apple</td><td>Delivering notifications</td><td>Global</td></tr>
-  <tr><td>Sentry</td><td>Crash reports, without your account details</td><td>European Union</td></tr>
+  <tr><td>Supabase</td><td>The database, sign-in and error reports</td><td>Mumbai, India</td></tr>
+  <tr><td>Resend</td><td>Emailing you your sign-in code. It sees only your email address and the code.</td><td>United States</td></tr>
+  <tr><td>Apple</td><td>Delivering notifications to your iPhone</td><td>Apple's servers</td></tr>
 </table>
 
 <h2>How long we keep it</h2>
 <ul>
   <li>Your account and ledgers, for as long as you have an account.</li>
   <li>Notifications you have read, for 90 days. Any notification, at most a year.</li>
-  <li>Crash reports, for 90 days.</li>
-  <li>Backups of the database, for up to 7 days after something is deleted.</li>
+  <li>Error reports, for 90 days after the error last happened.</li>
+  <li>Reports about other users, for as long as needed to deal with them, and at most a year.</li>
+  <li>Backup copies of the database, for up to 30 days.</li>
 </ul>
 
 <h2 id="deleting-your-account">Deleting your account</h2>

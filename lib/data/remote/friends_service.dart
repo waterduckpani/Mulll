@@ -11,6 +11,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'auth_service.dart';
 import 'backend.dart';
@@ -182,6 +183,68 @@ class FriendsService {
     } catch (e) {
       debugPrint('mull: remove friend failed ($e)');
       return const FriendsResult.failed("Couldn't do that. Try again.");
+    }
+  }
+
+  /// Stops someone reaching you: no friend requests, reminders or notices
+  /// from them. Ledgers you already share stay, because they are other
+  /// people's records too. They are not told.
+  static Future<FriendsResult> block(String userId) async {
+    try {
+      await Backend.client.rpc('block_user', params: {'target': userId});
+      return const FriendsResult.ok();
+    } catch (e) {
+      debugPrint('mull: block failed ($e)');
+      return const FriendsResult.failed("Couldn't block them. Try again.");
+    }
+  }
+
+  static Future<FriendsResult> unblock(String userId) async {
+    try {
+      await Backend.client.rpc('unblock_user', params: {'target': userId});
+      return const FriendsResult.ok();
+    } catch (e) {
+      debugPrint('mull: unblock failed ($e)');
+      return const FriendsResult.failed("Couldn't unblock them. Try again.");
+    }
+  }
+
+  /// Everyone you have blocked, newest first.
+  static Future<List<({String userId, String name})>> blocked() async {
+    try {
+      final rows = await Backend.client.rpc('my_blocks');
+      return [
+        for (final row in rows as List)
+          (userId: (row as Map)['user_id'] as String, name: row['name'] as String? ?? 'Someone'),
+      ];
+    } catch (e) {
+      debugPrint('mull: my_blocks failed ($e)');
+      return const [];
+    }
+  }
+
+  /// Sends a report to whoever runs Mull. [reason] is one of `spam`,
+  /// `harassment`, `impersonation` or `other`.
+  static Future<FriendsResult> report(
+    String userId, {
+    required String reason,
+    String note = '',
+    bool alsoBlock = false,
+  }) async {
+    try {
+      await Backend.client.rpc(
+        'report_user',
+        params: {'target': userId, 'reason': reason, 'note': note.trim(), 'also_block': alsoBlock},
+      );
+      return const FriendsResult.ok();
+    } on PostgrestException catch (e) {
+      debugPrint('mull: report failed ($e)');
+      return FriendsResult.failed(
+        e.code == '54000' ? "That's a lot of reports today. Email us instead." : "Couldn't send that. Try again.",
+      );
+    } catch (e) {
+      debugPrint('mull: report failed ($e)');
+      return const FriendsResult.failed("Couldn't send that. Try again.");
     }
   }
 
