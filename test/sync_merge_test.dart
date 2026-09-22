@@ -237,6 +237,40 @@ void main() {
       expect(store.groupById(goa.id), isNull);
     });
 
+    test('a group arriving for the first time counts as sent, so what is added to it goes up', () {
+      final other = MullStore.memory()..completeOnboarding(name: 'Ruhani');
+      final weekend = serverCopy(goa)..serverRev = 2;
+
+      other.replaceGroups([weekend], present: [goa.id]);
+
+      final here = other.groupById(goa.id)!;
+      expect(here.acked, isNotEmpty,
+          reason: 'with no record the push refuses the group, and nothing ever fetched it again');
+      expect(here.hasPendingChanges, isFalse);
+      other.addExpense(here, description: 'Car rental', amount: 2600, payerId: here.members.first.id, shares: {
+        here.members.first.id: 2600,
+      });
+      expect(here.hasPendingChanges, isTrue);
+    });
+
+    test('a group stuck with no record keeps what was added to it when it is fetched again', () {
+      // What phones on build 31 hold: synced, never recorded, one expense
+      // that the push has been refusing to send.
+      final server = serverCopy(goa);
+      goa.acked.clear();
+      final car = store.addExpense(goa, description: 'Car rental', amount: 2600, payerId: goa.you!.id, shares: {
+        goa.you!.id: 2600,
+      });
+
+      store.replaceGroups([server], present: [flat.id, goa.id]);
+
+      final after = store.groupById(goa.id)!;
+      expect(after.expenses.map((e) => e.id), contains(car.id), reason: 'the server never had it, so it is not a deletion');
+      expect(after.acked, isNotEmpty);
+      expect(after.acked.containsKey('e:${car.id}'), isFalse, reason: 'still to be sent');
+      expect(after.hasPendingChanges, isTrue);
+    });
+
     test('the revision it was fetched at is kept, and survives a restart', () {
       final server = serverCopy(current())..serverRev = 7;
 

@@ -139,7 +139,7 @@ class MullStore extends ChangeNotifier {
       for (final id in order)
         if (!pendingGroupDeletes.contains(id))
           if (fetched[id] case final server?)
-            held[id] == null ? server : _merge(held[id]!, server, keepLocalSchedules: keepLocalSchedules)
+            held[id] == null ? _arrived(server) : _merge(held[id]!, server, keepLocalSchedules: keepLocalSchedules)
           else
             ?held[id],
     ];
@@ -150,6 +150,16 @@ class MullStore extends ChangeNotifier {
       ..addAll(unsynced);
     _commit();
   }
+
+  /// A group this phone is seeing for the first time, exactly as the server
+  /// has it — so everything in it counts as sent.
+  ///
+  /// It used to arrive with no record at all, which the push reads as a group
+  /// synced by an older Mull and refuses to send until a pull fills it in. A
+  /// pull only fetches a group whose revision moved, so on a group nobody else
+  /// touched that pull never came: every expense added to it stayed on the
+  /// phone, while the notice about it went out to everyone else.
+  Group _arrived(Group server) => server..acked.addAll(server.printed);
 
   Group _merge(Group local, Group server, {required bool keepLocalSchedules}) {
     final before = local.acked;

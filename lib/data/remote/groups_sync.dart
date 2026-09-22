@@ -221,9 +221,16 @@ class GroupsSync {
         return true;
       }
 
+      // A group with no record of what the server has cannot push until a pull
+      // fills one in, so it is fetched whatever its revision says. Phones that
+      // took a group in whole before [MullStore.replaceGroups] recorded it were
+      // left holding exactly that, with nothing that would ever fetch it again.
+      bool unrecorded(Group? g) => g != null && g.hasReachedServer && g.acked.isEmpty;
       final changed = [
         for (final e in revs.entries)
-          if (_store.groupById(e.key)?.serverRev != e.value && !_store.pendingGroupDeletes.contains(e.key)) e.key,
+          if ((_store.groupById(e.key)?.serverRev != e.value || unrecorded(_store.groupById(e.key))) &&
+              !_store.pendingGroupDeletes.contains(e.key))
+            e.key,
       ];
       final groups = <Group>[];
       // In batches, so a first sign-in with a hundred groups does not build a
