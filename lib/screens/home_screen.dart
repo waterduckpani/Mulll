@@ -96,7 +96,7 @@ class HomeScreen extends StatelessWidget {
               _EmptyHome(onStart: start),
             ]
           : [
-              const _Headline(),
+              _Headline(people: people),
               _FriendRequestsCard(
                 onOpenLedger: (id) {
                   final g = store.groupById(id);
@@ -160,7 +160,7 @@ class HomeScreen extends StatelessWidget {
                   ),
                 ),
               ],
-              const _Footer(),
+              _Footer(people: people),
             ],
     );
   }
@@ -173,15 +173,18 @@ class HomeScreen extends StatelessWidget {
 /// two facts you would act on completely differently. So when both directions
 /// exist, both are said, and the line is tappable through to the names.
 class _Headline extends StatelessWidget {
-  const _Headline();
+  const _Headline({required this.people});
+
+  /// [MullStore.standings], worked out once by the home screen.
+  final List<Standing> people;
 
   @override
   Widget build(BuildContext context) {
     final c = context.c;
     final store = context.store;
     final net = store.netAcrossAll;
-    final owed = store.totalOwedToYou;
-    final owing = store.totalYouOwe;
+    final owed = MullStore.owedToYouIn(people);
+    final owing = MullStore.youOweIn(people);
     final bothWays = owed > 0 && owing > 0;
 
     final caption = switch (net) {
@@ -254,18 +257,20 @@ Future<void> _openWhoOwesWho(BuildContext context) async {
 
 /// The line at the end of the list.
 class _Footer extends StatelessWidget {
-  const _Footer();
+  const _Footer({required this.people});
+
+  /// [MullStore.standings], worked out once by the home screen.
+  final List<Standing> people;
 
   @override
   Widget build(BuildContext context) {
     final c = context.c;
-    final store = context.store;
-    final people = store.standings.where((s) => !s.isSquare).length;
-    if (people == 0) return const SizedBox(height: 12);
+    final unsquare = people.where((s) => !s.isSquare).length;
+    if (unsquare == 0) return const SizedBox(height: 12);
 
     return Pressable(
       onTap: () => _openWhoOwesWho(context),
-      semanticLabel: 'Who owes who, across $people people',
+      semanticLabel: 'Who owes who, across $unsquare people',
       child: ExcludeSemantics(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(Gutter.text, 30, Gutter.text, 4),
@@ -273,7 +278,7 @@ class _Footer extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  people == 1 ? 'One person to square up with' : '$people people to square up with',
+                  unsquare == 1 ? 'One person to square up with' : '$unsquare people to square up with',
                   style: MullType.caption(c.ink3, size: 12.5),
                 ),
               ),

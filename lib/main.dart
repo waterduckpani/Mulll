@@ -52,14 +52,14 @@ class MullApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final app = StoreScope(
       store: store,
-      child: ListenableBuilder(
-        listenable: store,
-        builder: (context, _) => MaterialApp(
+      child: _ThemeFollower(
+        store: store,
+        builder: (context, mode) => MaterialApp(
           title: 'Mull',
           debugShowCheckedModeBanner: false,
-          themeMode: store.profile.theme,
-          theme: buildTheme(MullColors.light),
-          darkTheme: buildTheme(MullColors.dark),
+          themeMode: mode,
+          theme: _lightTheme,
+          darkTheme: _darkTheme,
           builder: (context, child) {
             final mq = MediaQuery.of(context);
             final dark = Theme.of(context).brightness == Brightness.dark;
@@ -84,6 +84,60 @@ class MullApp extends StatelessWidget {
     final inbox = notices;
     return inbox == null ? app : NoticesScope(inbox: inbox, child: app);
   }
+}
+
+/// Built once. They are the same every time, and building them — twice, on
+/// every change to the ledger — was the costliest thing a small edit did.
+final _lightTheme = buildTheme(MullColors.light);
+final _darkTheme = buildTheme(MullColors.dark);
+
+/// Rebuilds the app around it when the theme setting changes, and only then.
+///
+/// It used to rebuild on every change to the store, which is every edit and
+/// every row a sync acknowledges. Everything below that needs the ledger
+/// listens to it through [StoreScope] already.
+class _ThemeFollower extends StatefulWidget {
+  const _ThemeFollower({required this.store, required this.builder});
+
+  final MullStore store;
+  final Widget Function(BuildContext context, ThemeMode mode) builder;
+
+  @override
+  State<_ThemeFollower> createState() => _ThemeFollowerState();
+}
+
+class _ThemeFollowerState extends State<_ThemeFollower> {
+  late ThemeMode _mode = widget.store.profile.theme;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.store.addListener(_follow);
+  }
+
+  @override
+  void didUpdateWidget(_ThemeFollower old) {
+    super.didUpdateWidget(old);
+    if (old.store != widget.store) {
+      old.store.removeListener(_follow);
+      widget.store.addListener(_follow);
+      _follow();
+    }
+  }
+
+  void _follow() {
+    final mode = widget.store.profile.theme;
+    if (mode != _mode) setState(() => _mode = mode);
+  }
+
+  @override
+  void dispose() {
+    widget.store.removeListener(_follow);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, _mode);
 }
 
 /// Sign in, then onboarding, then the app.

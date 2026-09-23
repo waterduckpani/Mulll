@@ -115,24 +115,40 @@ class GroupsSync {
   void start() {
     if (!Backend.isAvailable) return;
     _auth = Backend.client.auth.onAuthStateChange.listen((state) async {
-      if (state.session != null) {
+      final user = state.session?.user.id;
+      if (user != null) {
+        // Once per account, not once per event. The session announces itself
+        // at launch (already handled below) and again on every hourly token
+        // refresh, and each of those used to claim and pull all over again.
+        // Unless the last claim never reached the server: a launch with no
+        // signal is retried on the next refresh, as it always was.
+        if (user == _startedFor && !_claimFailed) return;
+        _startedFor = user;
         await claimThenPull();
         listen();
       } else {
+        _startedFor = null;
         await stop();
       }
     });
     if (Backend.isSignedIn) {
+      _startedFor = Backend.user?.id;
       unawaited(claimThenPull());
       listen();
     }
   }
 
+  /// The account this sync last claimed and pulled for.
+  String? _startedFor;
+
+  /// Whether the last claim could not reach the server.
+  bool _claimFailed = false;
+
   /// Runs on every sign-in and every launch, and after a friend request is
   /// accepted — accepting is what lets a seat waiting on your address be
   /// claimed. Claiming a seat that is already yours is a no-op.
   Future<void> claimThenPull() async {
-    await AuthService.claimSeats();
+    _claimFailed = await AuthService.claimSeats() == null;
     await pull();
   }
 
@@ -226,9 +242,11 @@ class GroupsSync {
       // took a group in whole before [MullStore.replaceGroups] recorded it were
       // left holding exactly that, with nothing that would ever fetch it again.
       bool unrecorded(Group? g) => g != null && g.hasReachedServer && g.acked.isEmpty;
+      // Looked up once each, not searched for twice per group listed.
+      final held = {for (final g in _store.groups) g.id: g};
       final changed = [
         for (final e in revs.entries)
-          if ((_store.groupById(e.key)?.serverRev != e.value || unrecorded(_store.groupById(e.key))) &&
+          if ((held[e.key]?.serverRev != e.value || unrecorded(held[e.key])) &&
               !_store.pendingGroupDeletes.contains(e.key))
             e.key,
       ];
@@ -525,6 +543,15 @@ class GroupsSync {
           if (fresh('g')) 'deleted_at': null,
         });
         landed(['g']);
+        // Deleted on this phone while that statement was on its way. The
+        // delete saw a group the server had never heard of and so told it
+        // nothing, and the group has just been created there — it would come
+        // back on the next pull. Queued behind this push, which stops here.
+        if (!group.hasReachedServer && _store.groupById(groupId) == null) {
+          _store.queueGroupDelete(groupId);
+          unawaited(deleteGroup(groupId));
+          return false;
+        }
       }
 
       // `user_id` sent plainly, including when null — guard_member_identity
@@ -574,9 +601,7 @@ class GroupsSync {
               if (fresh('r:${r.id}')) 'deleted_at': null,
             },
         ]);
-        for (final r in schedules) {
-          await _replaceShares('recurring_shares', 'recurring_id', r.id, r.shares);
-        }
+        await _replaceShares('recurring_shares', 'recurring_id', {for (final r in schedules) r.id: r.shares});
         landed([for (final r in schedules) 'r:${r.id}']);
       }
 
@@ -600,9 +625,7 @@ class GroupsSync {
               if (fresh('e:${e.id}')) 'deleted_at': null,
             },
         ]);
-        for (final e in expenses) {
-          await _replaceShares('expense_shares', 'expense_id', e.id, e.shares);
-        }
+        await _replaceShares('expense_shares', 'expense_id', {for (final e in expenses) e.id: e.shares});
         landed([for (final e in expenses) 'e:${e.id}']);
       }
 
@@ -650,21 +673,70 @@ class GroupsSync {
         ErrorReporter.report(e, StackTrace.current, context: 'push (${sent.length} rows landed first)');
       }
       _store.setSyncTrouble(true);
+      // Some rows may have landed before it failed, and were acknowledged
+      // quietly; this is where the screen hears about them.
+      if (sent.isNotEmpty) _store.announceSync();
       return false;
     }
   }
 
-  /// Makes the server's shares for one row exactly [shares].
+  /// Makes the server's shares for each row exactly what [byParent] says.
   ///
   /// An upsert can add and change shares but never remove one, so taking Dev
   /// out of a dinner left his old share on the server, the next pull put it
   /// back, and the split no longer added up to the bill — for everyone.
-  Future<void> _replaceShares(String table, String parent, String id, Map<String, int> shares) async {
+  ///
+  /// Every row's shares go up in one request and every stale share goes in
+  /// one more (split only to keep the URL short), rather than two requests
+  /// per row. Each request is a transaction the server bumps the group's
+  /// revision for and tells everyone in it about, so a trip's worth of
+  /// expenses used to be dozens of "look again"s where two will do.
+  Future<void> _replaceShares(String table, String parent, Map<String, Map<String, int>> byParent) async {
+    if (byParent.isEmpty) return;
     final db = Backend.client;
-    await db.from(table).upsert([
-      for (final entry in shares.entries) {parent: id, 'member_id': entry.key, 'amount': entry.value},
-    ]);
-    await db.from(table).delete().eq(parent, id).not('member_id', 'in', shares.keys.toList());
+    final rows = [
+      for (final MapEntry(key: id, value: shares) in byParent.entries)
+        for (final share in shares.entries) {parent: id, 'member_id': share.key, 'amount': share.value},
+    ];
+    if (rows.isNotEmpty) await db.from(table).upsert(rows);
+
+    for (final filter in staleShareFilters(parent, byParent)) {
+      await db.from(table).delete().or(filter);
+    }
+  }
+
+  /// The `or=` filters that match every share on the server that is not in
+  /// [byParent], a few rows to each so the URL stays short.
+  ///
+  /// `not.in.()` with nothing in it would match every share of that row, which
+  /// is what the old per-row delete did for a row with no shares; said
+  /// plainly here.
+  @visibleForTesting
+  static List<String> staleShareFilters(String parent, Map<String, Map<String, int>> byParent) => [
+    for (final run in chunked([
+      for (final MapEntry(key: id, value: shares) in byParent.entries)
+        shares.isEmpty
+            ? '$parent.eq.$id'
+            : 'and($parent.eq.$id,member_id.not.in.(${shares.keys.join(',')}))',
+    ], maxLength: 4000))
+      run.join(','),
+  ];
+
+  /// [clauses] in runs whose joined length stays under [maxLength].
+  @visibleForTesting
+  static Iterable<List<String>> chunked(List<String> clauses, {required int maxLength}) sync* {
+    var run = <String>[];
+    var length = 0;
+    for (final clause in clauses) {
+      if (run.isNotEmpty && length + clause.length + 1 > maxLength) {
+        yield run;
+        run = [];
+        length = 0;
+      }
+      run.add(clause);
+      length += clause.length + 1;
+    }
+    if (run.isNotEmpty) yield run;
   }
 
   /// Anything this phone has not managed to send yet: groups with unsent rows
@@ -694,38 +766,42 @@ class GroupsSync {
     final db = Backend.client;
     final done = <Tombstone>[];
 
-    Future<void> attempt(Tombstone t, Future<void> Function() call) async {
+    // One request per kind. If it fails, each row is tried on its own, as it
+    // always was, so one the server will not take — a seat still referenced,
+    // a payment between two other people — never holds the rest back.
+    Future<void> attempt(List<Tombstone> ts, Future<void> Function(List<String> ids) call) async {
+      if (ts.isEmpty) return;
       try {
-        await call();
-        done.add(t);
+        await call([for (final t in ts) t.id]);
+        done.addAll(ts);
+        return;
       } catch (e) {
-        debugPrint('mull: could not delete ${t.kind.name} ${t.id} ($e)');
+        if (ts.length == 1) {
+          debugPrint('mull: could not delete ${ts.single.kind.name} ${ts.single.id} ($e)');
+          return;
+        }
+      }
+      for (final t in ts) {
+        await attempt([t], call);
       }
     }
 
-    for (final t in [...group.tombstones]) {
-      switch (t.kind) {
-        case TombstoneKind.expense:
-          await attempt(
-            t,
-            () => db.from('expenses').update({'deleted_at': _stamp(DateTime.now())}).eq('id', t.id),
-          );
-        case TombstoneKind.recurring:
-          if (!extended) continue;
-          await attempt(
-            t,
-            () => db.from('recurring_expenses').update({'deleted_at': _stamp(DateTime.now())}).eq('id', t.id),
-          );
-        case TombstoneKind.settlement:
-          if (!settlementExtras) continue;
-          await attempt(
-            t,
-            () => db.from('settlements').update({'deleted_at': _stamp(DateTime.now())}).eq('id', t.id),
-          );
-        case TombstoneKind.member:
-          await attempt(t, () => db.from('members').delete().eq('id', t.id));
+    // Forty ids to a request, the same batch the pull uses, so a big clear-out
+    // never builds a URL too long for the gateway.
+    Future<void> each(TombstoneKind kind, Future<void> Function(List<String> ids) call) async {
+      final all = [for (final t in group.tombstones) if (t.kind == kind) t];
+      for (var i = 0; i < all.length; i += 40) {
+        await attempt(all.sublist(i, i + 40 > all.length ? all.length : i + 40), call);
       }
     }
+
+    Future<void> softDelete(String table, List<String> ids) =>
+        db.from(table).update({'deleted_at': _stamp(DateTime.now())}).inFilter('id', ids);
+
+    await each(TombstoneKind.expense, (ids) => softDelete('expenses', ids));
+    if (extended) await each(TombstoneKind.recurring, (ids) => softDelete('recurring_expenses', ids));
+    if (settlementExtras) await each(TombstoneKind.settlement, (ids) => softDelete('settlements', ids));
+    await each(TombstoneKind.member, (ids) => db.from('members').delete().inFilter('id', ids));
 
     _store.clearTombstones(group, done);
   }

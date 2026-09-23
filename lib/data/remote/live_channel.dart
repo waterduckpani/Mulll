@@ -61,7 +61,9 @@ class LiveChannel {
   void open() {
     final me = Backend.user?.id;
     if (!Backend.isAvailable || me == null || _channel != null) return;
-    _channel = Backend.client.channel('user:$me', opts: const RealtimeChannelConfig(private: true))
+    final channel = Backend.client.channel('user:$me', opts: const RealtimeChannelConfig(private: true));
+    _channel = channel;
+    channel
       ..onBroadcast(
         event: 'group_changed',
         callback: (message) {
@@ -74,6 +76,11 @@ class LiveChannel {
         callback: (message) => _notices.add(_payload(message)),
       )
       ..subscribe((status, error) {
+        // Only the current channel speaks for the connection. A replaced one
+        // still reports its own `closed` on the way out, sometimes late; acted
+        // on, it cleared the channel that had replaced it without leaving it,
+        // which then joined the same topic twice and the two closed each other.
+        if (!identical(_channel, channel)) return;
         switch (status) {
           case RealtimeSubscribeStatus.subscribed:
             _retries = 0;

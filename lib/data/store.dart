@@ -144,10 +144,21 @@ class MullStore extends ChangeNotifier {
             ?held[id],
     ];
 
+    final next = [...merged, ...unsynced];
+    // Nothing came down and nothing went: the same groups, the same objects,
+    // in the same order. Most polls end here, and each one used to rewrite
+    // the whole of mull.json. The screen is still told, as it always was,
+    // since a poll is also what moves anything that depends on the clock.
+    final unchanged = incoming.isEmpty &&
+        next.length == groups.length &&
+        [for (var i = 0; i < next.length; i++) identical(next[i], groups[i])].every((same) => same);
     groups
       ..clear()
-      ..addAll(merged)
-      ..addAll(unsynced);
+      ..addAll(next);
+    if (unchanged) {
+      notifyListeners();
+      return;
+    }
     _commit();
   }
 
@@ -248,17 +259,33 @@ class MullStore extends ChangeNotifier {
   /// handed the group straight back.
   final Set<String> pendingGroupDeletes = {};
 
+  /// The sync saying a group deleted here reached the server after all — its
+  /// first push was already on the way when it was deleted — so the server
+  /// has to be told it is gone, or the next pull hands it back.
+  void queueGroupDelete(String groupId) {
+    if (groupById(groupId) != null) return;
+    if (pendingGroupDeletes.add(groupId)) _commit();
+  }
+
   /// The sync saying the server has the deletion.
   void clearGroupDelete(String groupId) {
     if (pendingGroupDeletes.remove(groupId)) _commit();
   }
 
   /// Records that the server accepted these rows as they were printed.
+  ///
+  /// Saved, but the screen is not told: a push acknowledges several batches
+  /// in a row and each one rebuilt everything on screen. The sync calls
+  /// [announceSync] once the push is over, however it ended.
   void ackRows(Group group, Map<String, String> prints) {
     if (prints.isEmpty) return;
     group.acked.addAll(prints);
-    _commit();
+    _save();
   }
+
+  /// The sync saying a push has finished, so whatever reads what is still
+  /// unsent — "some changes haven't synced" — reads it again.
+  void announceSync() => notifyListeners();
 
   /// Set by the sync when a push or pull has failed and cleared once
   /// everything has gone up. Not persisted: it describes this session.
@@ -303,7 +330,8 @@ class MullStore extends ChangeNotifier {
     if (applied.isEmpty) return;
     final done = {for (final t in applied) '${t.kind.name}:${t.id}'};
     group.tombstones.removeWhere((t) => done.contains('${t.kind.name}:${t.id}'));
-    _commit();
+    // Quietly, like [ackRows]: [markGroupSynced] follows and tells the screen.
+    _save();
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -325,6 +353,10 @@ class MullStore extends ChangeNotifier {
 
   /// In-memory store for tests and previews.
   factory MullStore.memory() => MullStore._(null);
+
+  /// A store saving to [file]. Only for tests; the app goes through [load].
+  @visibleForTesting
+  factory MullStore.atFile(File file) => MullStore._(file);
 
   /// Loads a saved file straight in. Only for tests — the real path is [load],
   /// which has a disk read and a corruption fallback wrapped around this.
@@ -402,14 +434,35 @@ class MullStore extends ChangeNotifier {
 
   void _commit() {
     notifyListeners();
+    _save();
+  }
+
+  /// Writes to disk shortly, without telling the screen anything changed.
+  void _save() {
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 250), flush);
   }
 
-  Future<void> flush() async {
+  /// The write in progress, if any. Saves take turns.
+  ///
+  /// The debounced save and the one on backgrounding could overlap, and both
+  /// write the same `.tmp`: one truncating it while the other renamed it into
+  /// place left a half-written `mull.json`, which the next launch reads as
+  /// corrupt and starts over from — taking anything unsynced with it.
+  Future<void> _writing = Future.value();
+
+  Future<void> flush() {
     _saveTimer?.cancel();
     final file = _file;
-    if (file == null) return;
+    if (file == null) return Future.value();
+    // The snapshot is taken when this write's turn comes, so a queued save
+    // always writes the newest state rather than the state when it was asked.
+    final write = _writing.then((_) => _writeTo(file));
+    _writing = write.then<void>((_) {}, onError: (_) {});
+    return write;
+  }
+
+  Future<void> _writeTo(File file) async {
     final tmp = File('${file.path}.tmp');
     await tmp.writeAsString(jsonEncode(toJson()), flush: true);
     await tmp.rename(file.path);
@@ -591,14 +644,21 @@ class MullStore extends ChangeNotifier {
   /// the moment either moved. A list whose rows change places while you are
   /// reading it is a list you stop trusting; money you owe is also the more
   /// urgent half, so it goes on top and stays there.
-  List<Group> _ordered(Iterable<Group> of) => [...of]..sort((a, b) {
-    int rank(Group g) => switch (g.yourBalance) { < 0 => 0, > 0 => 1, _ => 2 };
-    final byDirection = rank(a).compareTo(rank(b));
-    if (byDirection != 0) return byDirection;
-    final byAmount = b.yourBalance.abs().compareTo(a.yourBalance.abs());
-    if (byAmount != 0) return byAmount;
-    return b.createdAt.compareTo(a.createdAt);
-  });
+  ///
+  /// Each balance is worked out once before sorting. Asked inside the
+  /// comparison, it replayed a group's whole ledger on every comparison.
+  List<Group> _ordered(Iterable<Group> of) {
+    final list = [...of];
+    final balance = {for (final g in list) g: g.yourBalance};
+    int rank(Group g) => switch (balance[g]!) { < 0 => 0, > 0 => 1, _ => 2 };
+    return list..sort((a, b) {
+      final byDirection = rank(a).compareTo(rank(b));
+      if (byDirection != 0) return byDirection;
+      final byAmount = balance[b]!.abs().compareTo(balance[a]!.abs());
+      if (byAmount != 0) return byAmount;
+      return b.createdAt.compareTo(a.createdAt);
+    });
+  }
 
   void updateGroup(Group group) => _commitGroup(group);
 
@@ -1682,8 +1742,14 @@ class MullStore extends ChangeNotifier {
   /// the trip *and* being owed by her on the flat, when netted she is one
   /// number in one direction — and the person reading it cannot reconcile a
   /// total that counts somebody twice.
-  int get totalYouOwe => standings.fold(0, (s, p) => s + (p.youOwe ? p.magnitude : 0));
-  int get totalOwedToYou => standings.fold(0, (s, p) => s + (p.theyOweYou ? p.amount : 0));
+  int get totalYouOwe => youOweIn(standings);
+  int get totalOwedToYou => owedToYouIn(standings);
+
+  /// The same two totals from [standings] a screen already has in hand.
+  /// Working out every person's balance is the expensive part, and the home
+  /// screen used to do it once per number it showed.
+  static int youOweIn(Iterable<Standing> people) => people.fold(0, (s, p) => s + (p.youOwe ? p.magnitude : 0));
+  static int owedToYouIn(Iterable<Standing> people) => people.fold(0, (s, p) => s + (p.theyOweYou ? p.amount : 0));
 
   bool get isAllSquare => groups.every((g) => g.yourBalance == 0);
 

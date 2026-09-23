@@ -54,24 +54,25 @@ function clip(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
 }
 
-Deno.serve(async (req) => {
-  if (req.headers.get("x-mull-push-secret") !== Deno.env.get("PUSH_WEBHOOK_SECRET")) {
-    return new Response("forbidden", { status: 403 });
-  }
-  if (!Deno.env.get("APNS_PRIVATE_KEY")) {
-    // Deployed before the key exists. Nothing to do, and not an error.
-    return Response.json({ skipped: "no APNs key configured" });
-  }
+// Compared in constant time. `!==` stops at the first differing character,
+// and how long it took says how much of a guess was right.
+function sameSecret(given: string | null, expected: string | undefined): boolean {
+  if (!given || !expected) return false;
+  const a = new TextEncoder().encode(given);
+  const b = new TextEncoder().encode(expected);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < b.length; i++) diff |= (a[i % (a.length || 1)] ?? 0) ^ b[i];
+  return diff === 0;
+}
 
-  const { notice_id } = await req.json().catch(() => ({}));
-  if (typeof notice_id !== "string") return new Response("bad request", { status: 400 });
-
+// One notice to all of its recipient's phones.
+async function sendNotice(notice_id: string): Promise<{ sent: number; removed: number; skipped?: string }> {
   const { data: notice } = await db
     .from("notices")
     .select("id, recipient_id, actor_id, kind, group_id, title, body")
     .eq("id", notice_id)
     .maybeSingle();
-  if (!notice) return Response.json({ skipped: "no such notice" });
+  if (!notice) return { sent: 0, removed: 0, skipped: "no such notice" };
 
   const [{ data: tokens }, { data: group }, { data: actor }, { count: unread }] = await Promise.all([
     db.from("push_tokens").select("token, environment").eq("user_id", notice.recipient_id),
@@ -84,7 +85,7 @@ Deno.serve(async (req) => {
     db.from("notices").select("id", { count: "exact", head: true })
       .eq("recipient_id", notice.recipient_id).is("read_at", null),
   ]);
-  if (!tokens?.length) return Response.json({ sent: 0 });
+  if (!tokens?.length) return { sent: 0, removed: 0 };
 
   const actorName = (actor?.name ?? "").trim();
   const heading = group && group.kind !== "direct" && group.name?.trim()
@@ -141,5 +142,38 @@ Deno.serve(async (req) => {
   }));
 
   if (dead.length) await db.from("push_tokens").delete().in("token", dead);
-  return Response.json({ sent, removed: dead.length });
+  return { sent, removed: dead.length };
+}
+
+Deno.serve(async (req) => {
+  if (!sameSecret(req.headers.get("x-mull-push-secret"), Deno.env.get("PUSH_WEBHOOK_SECRET"))) {
+    return new Response("forbidden", { status: 403 });
+  }
+  if (!Deno.env.get("APNS_PRIVATE_KEY")) {
+    // Deployed before the key exists. Nothing to do, and not an error.
+    return Response.json({ skipped: "no APNs key configured" });
+  }
+
+  // `notice_ids` is every notice one insert wrote — one call for a whole
+  // group's worth, where each notice used to be a call of its own.
+  // `notice_id` is the single form the trigger sent before.
+  const request = (await req.json().catch(() => null)) ?? {};
+  const ids: unknown[] = Array.isArray(request.notice_ids) ? request.notice_ids : [request.notice_id];
+  if (!ids.length || !ids.every((id) => typeof id === "string")) {
+    return new Response("bad request", { status: 400 });
+  }
+
+  let sent = 0;
+  let removed = 0;
+  for (const id of ids.slice(0, 100) as string[]) {
+    try {
+      const result = await sendNotice(id);
+      sent += result.sent;
+      removed += result.removed;
+    } catch (e) {
+      // One notice that could not be sent does not stop the rest.
+      console.error(`push ${id}: ${e}`);
+    }
+  }
+  return Response.json({ sent, removed });
 });

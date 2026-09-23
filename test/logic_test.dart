@@ -34,6 +34,13 @@ void main() {
         expect(parseAmount(s), isNull, reason: s);
       }
     });
+
+    test('refuses what the server cannot store', () {
+      expect(parseAmount('2147483647'), kMaxAmount);
+      expect(parseAmount('2147483648'), isNull);
+      expect(parseAmount('500cr'), isNull);
+      expect(parseAmount('200cr'), 2000000000);
+    });
   });
 
   group('dates', () {
@@ -1302,6 +1309,16 @@ void main() {
         'cu': 'INR',
         'tn': 'Goa trip',
       });
+    });
+
+    test('writes spaces as %20, never as a plus the UPI app would show', () {
+      final uri = upiPaymentUri(upiId: 'a@okaxis', name: 'Sahil Mehta+Co', amount: 10, note: 'Goa trip');
+      expect(uri.toString(), isNot(contains('+')));
+      expect(uri.query, contains('pn=Sahil%20Mehta%2BCo'));
+      expect(uri.queryParameters['pn'], 'Sahil Mehta+Co');
+      expect(uri.queryParameters['tn'], 'Goa trip');
+      // Each app's own scheme carries the same query across.
+      expect(UpiApp.all.first.uriFor(uri).query, uri.query);
     });
 
     test('leaves the note out rather than sending an empty one', () {

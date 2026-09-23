@@ -23,6 +23,7 @@ class PushService {
   static String? _token;
   static String _environment = 'production';
   static StreamSubscription<AuthState>? _auth;
+  static String? _registeredFor;
 
   /// Goes up by one each time a notification is tapped. The shell listens and
   /// opens the inbox.
@@ -34,7 +35,11 @@ class PushService {
     // A token that arrived before sign-in, or belonged to the last account on
     // this phone, is (re)claimed by whoever signs in.
     _auth ??= Backend.client.auth.onAuthStateChange.listen((state) {
-      if (state.session != null) unawaited(_sendToServer());
+      // Once per account: a token refresh is not a new owner for the device.
+      final user = state.session?.user.id;
+      if (user == _registeredFor) return;
+      _registeredFor = user;
+      if (user != null) unawaited(_sendToServer());
     });
     unawaited(_takeOpened());
   }
@@ -96,6 +101,8 @@ class PushService {
       );
     } catch (e) {
       debugPrint('mull: register_push_token failed ($e)');
+      // Try again on the next session event, as every event used to.
+      _registeredFor = null;
     }
   }
 

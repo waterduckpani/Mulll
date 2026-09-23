@@ -15,8 +15,13 @@ final _upiId = RegExp(r'^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$');
 bool isUpiId(String value) => _upiId.hasMatch(value.trim());
 
 /// A payment, pre-filled. `am` is rupees; `tn` is the note the payee sees.
+///
+/// Spaces go as `%20`. Dart's query encoding writes them as `+`, the form
+/// convention, and several UPI apps show that literally: "Sahil+Mehra",
+/// "Goa+trip". A real plus in a name is already `%2B`, so every `+` left in
+/// the string was a space.
 Uri upiPaymentUri({required String upiId, required String name, required int amount, String? note}) {
-  return Uri(
+  final formEncoded = Uri(
     scheme: 'upi',
     host: 'pay',
     queryParameters: {
@@ -29,6 +34,7 @@ Uri upiPaymentUri({required String upiId, required String name, required int amo
       if (note != null && note.trim().isNotEmpty) 'tn': note.trim(),
     },
   );
+  return Uri.parse(formEncoded.toString().replaceAll('+', '%20'));
 }
 
 /// A UPI app Mull can hand a payment to directly.

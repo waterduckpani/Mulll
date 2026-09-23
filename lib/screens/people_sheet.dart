@@ -596,8 +596,10 @@ class _EveryoneSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.c;
     final store = context.store;
-    final owed = store.owedToYou;
-    final owing = store.youOweThem;
+    // One pass over every ledger for both lists, rather than one each.
+    final everyone = store.standings;
+    final owed = [for (final s in everyone) if (s.theyOweYou) s];
+    final owing = [for (final s in everyone) if (s.youOwe) s];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -94,7 +94,9 @@ class AuthService {
   ///
   /// This is what lets someone add you to a flat before you have heard of
   /// Mull: the seat sits there holding your share, and signing up collects it.
-  static Future<({int seats, int friends})> claimSeats() async {
+  ///
+  /// Null if the server could not be reached, so the caller can try again.
+  static Future<({int seats, int friends})?> claimSeats() async {
     if (!Backend.isAvailable) return (seats: 0, friends: 0);
     try {
       final claimed = await Backend.client.rpc('claim_invitations');
@@ -105,7 +107,7 @@ class AuthService {
       );
     } catch (e) {
       debugPrint('mull: claim_invitations failed ($e)');
-      return (seats: 0, friends: 0);
+      return null;
     }
   }
 

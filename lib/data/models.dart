@@ -5,7 +5,10 @@ import 'package:flutter/material.dart' show ThemeMode;
 import '../core/dates.dart';
 import '../core/split.dart';
 
-final _rng = Random();
+/// The operating system's generator, not Dart's default one. These ids are
+/// primary keys shared by every phone on one server, and a v4 uuid is only as
+/// unique as the randomness behind it.
+final _rng = Random.secure();
 
 /// A UUID v4.
 ///
@@ -623,10 +626,17 @@ class Group {
 
   /// Anything at all still waiting to go up — for retrying, and for warning
   /// someone before they sign out and lose it.
+  ///
+  /// Row by row, stopping at the first unsent one, rather than printing the
+  /// whole group into a map first. Asked for every group after every pull.
   bool get hasPendingChanges =>
       !hasReachedServer ||
       tombstones.isNotEmpty ||
-      printed.entries.any((e) => isDirty(e.key, e.value));
+      acked['g'] != groupPrint ||
+      members.any((m) => acked['m:${m.id}'] != m.syncPrint) ||
+      expenses.any((e) => acked['e:${e.id}'] != e.syncPrint) ||
+      recurring.any((r) => acked['r:${r.id}'] != r.syncPrint) ||
+      settlements.any((s) => acked['s:${s.id}'] != s.syncPrint);
 
   bool get isDirect => kind == GroupKind.direct;
 
@@ -672,7 +682,8 @@ class Group {
     }
     // Someone removed from the group can still appear in old expenses; their
     // balance is real history, but it is not a row anyone can act on.
-    net.removeWhere((id, value) => memberById(id) == null && value == 0);
+    final seated = {for (final m in members) m.id};
+    net.removeWhere((id, value) => !seated.contains(id) && value == 0);
     return net;
   }
 

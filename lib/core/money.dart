@@ -41,5 +41,10 @@ int? parseAmount(String input) {
     _ => 1,
   };
   final value = (n * multiplier).round();
-  return value > 0 && value < 100000000000 ? value : null;
+  return value > 0 && value <= kMaxAmount ? value : null;
 }
+
+/// The largest amount the server can hold: its money columns are Postgres
+/// `integer`. A bigger one was accepted here, refused on push, and — because
+/// a group's rows go up in order — held back everything added after it.
+const kMaxAmount = 2147483647;

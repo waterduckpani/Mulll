@@ -47,15 +47,27 @@ class NoticesInbox extends ChangeNotifier {
     addListener(_syncBadge);
     channel.connected.addListener(_onConnection);
     _auth = Backend.client.auth.onAuthStateChange.listen((state) async {
-      if (state.session != null) {
+      final user = state.session?.user.id;
+      if (user != null) {
+        // Once per account. A token refresh is the same person, and refetching
+        // the whole inbox for it every hour bought nothing.
+        if (user == _loadedFor) return;
+        _loadedFor = user;
         await refresh();
       } else {
+        _loadedFor = null;
         _all.clear();
         notifyListeners();
       }
     });
-    if (Backend.isSignedIn) unawaited(refresh());
+    if (Backend.isSignedIn) {
+      _loadedFor = Backend.user?.id;
+      unawaited(refresh());
+    }
   }
+
+  /// The account whose inbox was last loaded.
+  String? _loadedFor;
 
   void _onNotice(Map<String, dynamic> row) {
     final Notified notice;
