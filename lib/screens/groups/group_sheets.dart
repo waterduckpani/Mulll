@@ -365,6 +365,11 @@ class _SettleSheetState extends State<_SettleSheet> {
 
     final youPay = from.isYou;
     final owedToYou = to.isYou;
+    // Somebody else's debt is theirs to settle. This sheet used to offer
+    // "Mark as settled" on it to anybody in the group. Two people who are both
+    // not on Mull are the exception: nobody else could ever write it down.
+    final forThem = !youPay && !owedToYou;
+    if (forThem && (from.isLinked || to.isLinked)) return const SizedBox.shrink();
     final payee = to;
     final part = _valid && _value! < _max;
 
@@ -381,30 +386,27 @@ class _SettleSheetState extends State<_SettleSheet> {
     Future<void> payWithUpi() async {
       final upi = payee.upiId;
       if (upi == null) return;
-      final amount = _value!;
-      final opened = await payOverUpi(
+      final outcome = await payOverUpi(
         context,
         upiId: upi,
         name: payee.name,
-        amount: amount,
+        amount: _value!,
         note: group.title,
       );
-      if (!context.mounted || opened == null) return;
-      if (!opened) {
-        Toast.show(
-          context,
-          'No UPI app could open that',
-          // Some UPI apps refuse a payment link they did not start themselves.
-          // Pasting the ID into one by hand always works.
-          action: 'Copy ID',
-          onAction: () => Clipboard.setData(ClipboardData(text: upi)),
-        );
-        return;
+      if (!context.mounted) return;
+      switch (outcome) {
+        case UpiOutcome.paid:
+          record();
+        case UpiOutcome.noApp:
+          Toast.show(
+            context,
+            'No UPI app could open that',
+            action: 'Copy ID',
+            onAction: () => Clipboard.setData(ClipboardData(text: upi)),
+          );
+        case UpiOutcome.notPaid || UpiOutcome.cancelled:
+          break;
       }
-      // We cannot know whether the payment went through — only the user can
-      // say. Marking it paid automatically would quietly falsify the ledger.
-      if (context.mounted) Navigator.of(context).pop();
-      if (context.mounted) await _confirmPaid(context, group, transfer, amount);
     }
 
     /// Chases them inside Mull, not in a chat app. Twice a day, counted on the
@@ -420,7 +422,11 @@ class _SettleSheetState extends State<_SettleSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Eyebrow(youPay ? 'You owe' : '${store.shortName(from)} owes ${store.shortName(to)}'),
+          Eyebrow(switch (null) {
+            _ when youPay => 'You owe ${store.shortName(to)}',
+            _ when forThem => '${store.shortName(from)} owes ${store.shortName(to)}',
+            _ => '${store.shortName(from)} owes you',
+          }),
           const SizedBox(height: 12),
           // An editable amount, because "I will send you 500 of the 1,800 now"
           // is the most ordinary sentence in splitting money and Mull had no
@@ -453,10 +459,11 @@ class _SettleSheetState extends State<_SettleSheet> {
               _ when owedToYou && !from.isLinked =>
                 '${store.shortName(from)} is not on Mull. Settle in person, then '
                     'mark it here.',
-              _ when owedToYou =>
+              _ when forThem =>
+                'Neither of them is on Mull. Mark it once they tell you it is done.',
+              _ =>
                 'They pay you straight over UPI. Mark it here once it lands, or '
                     'wait for them to say they have sent it.',
-              _ => 'Mull just keeps the record. The money moves between them.',
             },
             style: ranade(13, height: 1.5, color: c.ink3),
           ),
@@ -491,46 +498,6 @@ class _SettleSheetState extends State<_SettleSheet> {
       ),
     );
   }
-}
-
-/// After sending someone to their UPI app, the only honest thing is to ask.
-Future<void> _confirmPaid(
-  BuildContext context,
-  Group group,
-  Transfer transfer,
-  int amount,
-) {
-  final store = context.readStore;
-  return showMullSheet(
-    context,
-    fitContent: true,
-    builder: (sheet) => Padding(
-      padding: const EdgeInsets.fromLTRB(30, 28, 30, 26),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text('Did it go through?', style: excon(28, tracking: -.02, color: sheet.c.ink)),
-          const SizedBox(height: 10),
-          Text(
-            'Mull cannot see your UPI app, so it only records what you tell it.',
-            style: ranade(13, height: 1.6, color: sheet.c.ink3),
-          ),
-          const SizedBox(height: 24),
-          PillButton(
-            'Yes, mark it settled',
-            onTap: () {
-              store.settleUp(group, fromId: transfer.from, toId: transfer.to, amount: amount);
-              HapticFeedback.mediumImpact();
-              Navigator.of(sheet).pop();
-            },
-          ),
-          const SizedBox(height: 8),
-          SecondaryButton('Not yet', onTap: () => Navigator.of(sheet).pop()),
-        ],
-      ),
-    ),
-  );
 }
 
 /// "Sahil says he sent you ₹2,400" — the Check button on the home screen.
@@ -670,6 +637,8 @@ Future<void> showOwnClaim(BuildContext context, Group group, Settlement settleme
   final to = group.memberById(settlement.toId);
   final disputed = settlement.status == SettlementStatus.disputed;
   final name = to == null ? 'They' : store.shortName(to);
+  final standing = to == null ? null : store.standingWith(to);
+  final canNudge = standing == null || store.nudgesLeft(standing) > 0;
 
   return showMullSheet(
     context,
@@ -703,13 +672,22 @@ Future<void> showOwnClaim(BuildContext context, Group group, Settlement settleme
             style: ranade(12.5, height: 1.6, color: sheet.c.ink3),
           ),
           const SizedBox(height: 22),
-          if (to != null)
+          if (to != null && canNudge)
             PillButton(
-              'Nudge $name',
+              'Ask $name to confirm',
               onTap: () {
                 Navigator.of(sheet).pop();
-                remindMember(context, group, to, settlement.amount);
+                remindMember(context, group, to, settlement.amount, claim: settlement);
               },
+            )
+          else if (to != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Text(
+                "You've nudged $name twice today. You can again tomorrow.",
+                textAlign: TextAlign.center,
+                style: MullType.caption(sheet.c.ink3),
+              ),
             ),
           const SizedBox(height: 8),
           SecondaryButton(
@@ -799,46 +777,66 @@ Future<void> confirmRemoveSettlement(
   );
 }
 
-/// Chases one person about one debt, in the group it belongs to.
+/// Chases one person about one debt, in the group it belongs to — or, with a
+/// [claim], asks them to confirm money you say you sent.
+///
+/// Counted against the same two-a-day allowance as a nudge from the person
+/// sheet. It used to count nothing locally, so the button stayed live and every
+/// tap after the second went to the server just to be refused.
 Future<void> remindMember(
   BuildContext context,
   Group group,
   Member member,
-  int amount,
-) async {
+  int amount, {
+  Settlement? claim,
+}) async {
   final store = context.readStore;
   final userId = member.userId;
+  final standing = store.standingWith(member);
+  final name = store.shortName(member);
+
+  if (standing != null && store.nudgesLeft(standing) == 0) {
+    Toast.show(context, "You've nudged $name twice today. You can again tomorrow.");
+    return;
+  }
 
   if (userId == null) {
     // No account behind that seat, so there is no inbox to reach. WhatsApp is
     // the honest fallback rather than a button that does nothing.
     final message = [
-      'Hey ${store.shortName(member)}, ${inr(amount)} for ${group.title} '
-          'when you get a chance.',
+      'Hey $name, ${inr(amount)} for ${group.title} when you get a chance.',
       if (store.profile.upiId != null) 'My UPI is ${store.profile.upiId}.',
     ].join(' ');
     final sent = await shareOnWhatsApp(message, phone: member.phone);
     if (!context.mounted) return;
-    Toast.show(
-      context,
-      sent ? '${store.shortName(member)} is not on Mull — sent on WhatsApp' : "Couldn't open WhatsApp",
-    );
+    if (sent && standing != null) store.markNudged(standing);
+    Toast.show(context, sent ? '$name is not on Mull — sent on WhatsApp' : "Couldn't open WhatsApp");
     return;
   }
 
+  final me = store.profile.name.trim().split(' ').first;
   final outcome = await NoticesService.remind(
     toUserId: userId,
     groupId: group.id,
-    title: '${store.profile.name.trim().split(' ').first} is waiting on ${inr(amount)}',
-    body: group.title,
+    // A confirmation nudge is not a debt reminder. Worded as one, it told the
+    // person you had just paid that they owed you the same amount.
+    title: claim != null
+        ? '$me is waiting for you to confirm ${inr(amount)}'
+        : '$me is waiting on ${inr(amount)}',
+    body: claim != null ? 'Check it landed, then confirm it in ${group.title}' : group.title,
     amount: amount,
   );
   if (!context.mounted) return;
-  Toast.show(context, switch (outcome) {
-    ReminderOutcome.sent => 'Nudged ${store.shortName(member)}',
-    ReminderOutcome.outOfTurns => "That's both of today's nudges. Try again tomorrow.",
-    ReminderOutcome.failed => "Couldn't send that. Check your connection.",
-  });
+  switch (outcome) {
+    case ReminderOutcome.sent:
+      if (standing != null) store.markNudged(standing);
+      Toast.show(context, 'Nudged $name');
+    case ReminderOutcome.outOfTurns:
+      if (standing != null) store.spendNudges(standing);
+      Toast.show(context, "That's both of today's nudges. Try again tomorrow.");
+    case ReminderOutcome.failed:
+      Toast.show(context, "Couldn't send that. Check your connection.");
+  }
 }
 
 /// Puts the group's state into WhatsApp as plain text.
@@ -1115,6 +1113,7 @@ class _MemberSheetState extends State<_MemberSheet> {
 Future<bool> confirmLeaveGroup(BuildContext context, Group group) async {
   final store = context.readStore;
   final why = store.whyYouCannotLeave(group);
+  final open = store.openOnLeaving(group);
   final confirmed = await showMullSheet<bool>(
     context,
     fitContent: true,
@@ -1135,9 +1134,32 @@ Future<bool> confirmLeaveGroup(BuildContext context, Group group) async {
                     'and the expenses you were part of stay in it under your name.',
             style: ranade(14, height: 1.6, color: sheet.c.ink3),
           ),
+          // Leaving is allowed with money open, and it clears none of it. Said
+          // plainly, with the names, before and not after.
+          if (why == null && open.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Text(
+              [
+                for (final (other, amount) in open)
+                  amount > 0
+                      ? '${store.shortName(other)} still owes you ${inr(amount)}'
+                      : 'You still owe ${store.shortName(other)} ${inr(-amount)}',
+              ].join('\n'),
+              style: ranade(14, height: 1.6, color: sheet.c.ink),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Leaving does not clear this. It stays in the group, they are told '
+              'you left, and it is between you to settle.',
+              style: ranade(13, height: 1.6, color: sheet.c.ink3),
+            ),
+          ],
           const SizedBox(height: 24),
           if (why == null) ...[
-            PillButton('Leave it', onTap: () => Navigator.of(sheet).pop(true)),
+            PillButton(
+              open.isEmpty ? 'Leave it' : 'Leave anyway',
+              onTap: () => Navigator.of(sheet).pop(true),
+            ),
             const SizedBox(height: 8),
             SecondaryButton('Stay', onTap: () => Navigator.of(sheet).pop(false)),
           ] else

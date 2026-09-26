@@ -322,7 +322,7 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
     // Prefilled with the whole thing, because clearing the debt is what most
     // people are here to do — and selected, so typing a part payment replaces
     // it rather than appending to it.
-    _amount = AmountController(_standing?.magnitude)..addListener(() => setState(() {}));
+    _amount = AmountController(_max == 0 ? null : _max)..addListener(() => setState(() {}));
   }
 
   Standing? _find(BuildContext context) =>
@@ -335,7 +335,11 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
     super.dispose();
   }
 
-  int get _max => _standing?.magnitude ?? 0;
+  /// What is still open once claims you have already sent are counted. The
+  /// whole magnitude was offered again while one sat unconfirmed, which is how
+  /// the same debt got paid twice.
+  int get _claimed => _standing == null ? 0 : context.readStore.claimedWith(_standing!);
+  int get _max => ((_standing?.magnitude ?? 0) - _claimed).clamp(0, _standing?.magnitude ?? 0);
   int? get _value => _amount.amount;
   bool get _valid => _value != null && _value! > 0 && _value! <= _max;
 
@@ -368,29 +372,27 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
     final standing = _standing!;
     final upi = _payeeUpi;
     if (upi == null) return;
-    final opened = await payOverUpi(
+    final outcome = await payOverUpi(
       context,
       upiId: upi,
       name: standing.member.name,
       amount: _value!,
       note: standing.groups.length == 1 ? standing.groups.first.title : 'Mull',
     );
-    if (!mounted || opened == null) return;
-    if (!opened) {
-      Toast.show(
-        context,
-        'No UPI app could open that',
-        // Some UPI apps refuse a payment link they did not start themselves.
-        // Pasting the ID into one by hand always works.
-        action: 'Copy ID',
-        onAction: () => Clipboard.setData(ClipboardData(text: upi)),
-      );
-      return;
+    if (!mounted) return;
+    switch (outcome) {
+      case UpiOutcome.paid:
+        _record();
+      case UpiOutcome.noApp:
+        Toast.show(
+          context,
+          'No UPI app could open that',
+          action: 'Copy ID',
+          onAction: () => Clipboard.setData(ClipboardData(text: upi)),
+        );
+      case UpiOutcome.notPaid || UpiOutcome.cancelled:
+        break;
     }
-    // Mull cannot see the UPI app, so the only honest thing is to ask.
-    final went = await _didItGoThrough(context);
-    if (!mounted || went != true) return;
-    _record();
   }
 
   @override
@@ -415,7 +417,13 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
             padding: const EdgeInsets.fromLTRB(30, 8, 30, 20),
             children: [
               Text(
-                theyOwe ? '$name owes you ${inr(_max)}' : 'You owe $name ${inr(_max)}',
+                [
+                  theyOwe ? '$name owes you ${inr(standing.magnitude)}' : 'You owe $name ${inr(standing.magnitude)}',
+                  if (_claimed > 0)
+                    theyOwe
+                        ? '$name says ${inr(_claimed)} of it is on its way. Confirm that from the claim, not here'
+                        : 'You have said you sent ${inr(_claimed)}. That is waiting on $name to confirm',
+                ].join('. '),
                 style: MullType.caption(c.ink3),
               ),
               const SizedBox(height: 18),
@@ -475,7 +483,9 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (!theyOwe && upi != null) ...[
+              if (_max == 0)
+                PillButton('Done', onTap: () => Navigator.of(context).pop())
+              else if (!theyOwe && upi != null) ...[
                 PillButton(
                   _valid ? 'Pay ${inr(_value!)} over UPI' : 'Pay over UPI',
                   onTap: _valid ? _payOverUpi : null,
@@ -498,29 +508,6 @@ class _SettleAcrossSheetState extends State<_SettleAcrossSheet> {
   }
 }
 
-Future<bool?> _didItGoThrough(BuildContext context) => showMullSheet<bool>(
-  context,
-  fitContent: true,
-  builder: (sheet) => Padding(
-    padding: const EdgeInsets.fromLTRB(30, 28, 30, 26),
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text('Did it go through?', style: excon(28, tracking: -.02, color: sheet.c.ink)),
-        const SizedBox(height: 10),
-        Text(
-          'Mull cannot see your UPI app, so it only records what you tell it.',
-          style: ranade(13, height: 1.6, color: sheet.c.ink3),
-        ),
-        const SizedBox(height: 24),
-        PillButton('Yes, mark it settled', onTap: () => Navigator.of(sheet).pop(true)),
-        const SizedBox(height: 8),
-        SecondaryButton('Not yet', onTap: () => Navigator.of(sheet).pop(false)),
-      ],
-    ),
-  ),
-);
 
 // ---------------------------------------------------------------- reminders
 

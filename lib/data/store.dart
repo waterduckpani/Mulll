@@ -649,7 +649,11 @@ class MullStore extends ChangeNotifier {
   /// comparison, it replayed a group's whole ledger on every comparison.
   List<Group> _ordered(Iterable<Group> of) {
     final list = [...of];
-    final balance = {for (final g in list) g: g.yourBalance};
+    // Owing anyone outranks being owed, and a group where you are in the middle
+    // is not a group you are square in.
+    final balance = {
+      for (final g in list) g: (g.youOweHere > 0 ? -g.youOweHere : g.owedToYouHere),
+    };
     int rank(Group g) => switch (balance[g]!) { < 0 => 0, > 0 => 1, _ => 2 };
     return list..sort((a, b) {
       final byDirection = rank(a).compareTo(rank(b));
@@ -769,6 +773,37 @@ class MullStore extends ChangeNotifier {
 
   // -------------------------------------------------------------------- admin
 
+  /// Why you cannot unfriend someone yet, or null if you can.
+  ///
+  /// Not while money is open between you, either way, or a payment is waiting
+  /// on one of you to confirm it. Unfriending does not clear a debt, it only
+  /// makes it awkward to settle. Someone being a nuisance can still be blocked,
+  /// which stops them reaching you without pretending the money is gone.
+  String? whyYouCannotUnfriend(String userId) {
+    final standing = standings.where((s) => s.member.userId == userId).firstOrNull;
+    final name = standing == null ? 'them' : shortName(standing.member);
+    if (standing != null && !standing.isSquare) {
+      return standing.theyOweYou
+          ? '$name still owes you ${inr(standing.magnitude)}. Settle up first. '
+              'If they are bothering you, you can block them instead.'
+          : 'You still owe $name ${inr(standing.magnitude)}. Settle up first. '
+              'If they are bothering you, you can block them instead.';
+    }
+    for (final g in groups) {
+      final me = g.you?.id;
+      if (me == null) continue;
+      for (final s in g.settlements) {
+        if (s.status == SettlementStatus.confirmed) continue;
+        final other = s.fromId == me ? s.toId : (s.toId == me ? s.fromId : null);
+        if (other != null && g.memberById(other)?.userId == userId) {
+          return 'A payment between you and $name is still waiting to be '
+              'confirmed. Once it is sorted you can remove them.';
+        }
+      }
+    }
+    return null;
+  }
+
   /// Hands the group over, or takes it back.
   ///
   /// Refuses to leave a group with nobody running it. That state cannot be
@@ -794,15 +829,13 @@ class MullStore extends ChangeNotifier {
     final you = group.you;
     if (you == null) return null;
     if (group.isDirect) return null;
-    if (group.yourBalance != 0) {
-      return 'You still owe or are owed money here. Settle up first, or the '
-          'numbers stop adding up for everyone else.';
-    }
-    if (group.settlements.any(
-      (s) => s.status == SettlementStatus.pending && (s.fromId == you.id || s.toId == you.id),
-    )) {
-      return 'A payment with you is still waiting to be confirmed. Once it is, '
-          'you can leave.';
+    // Money still open is not a reason to keep someone in a group: that is
+    // trapping them, and it never got anybody paid. It stays on the record
+    // instead — see [leaveGroupEverywhere]. A payment waiting on *you* is
+    // different: only you can answer it, and once you are gone nobody can.
+    if (group.settlements.any((s) => s.status == SettlementStatus.pending && s.toId == you.id)) {
+      return 'Someone says they paid you here. Confirm it or say it never '
+          'arrived first. Nobody else can answer it once you have gone.';
     }
     final othersOnMull = group.members.any((m) => !m.isYou && m.isLinked);
     if (you.isAdmin && group.admins.length < 2 && othersOnMull) {
@@ -818,10 +851,45 @@ class MullStore extends ChangeNotifier {
   /// do. False if it could not be reached.
   Future<bool> Function(String groupId)? onLeave;
 
+  /// What leaving would leave open, per person: positive means they owe you.
+  List<(Member, int)> openOnLeaving(Group group) {
+    final me = group.you?.id;
+    return [
+      for (final t in group.yourTransfers)
+        if (group.memberById(t.from == me ? t.to : t.from) case final other?)
+          (other, t.from == me ? -t.amount : t.amount),
+    ];
+  }
+
+  /// Sends a notice and waits for it. Leaving needs this: the server only
+  /// takes a notice about a group from someone still in it.
+  Future<void> Function(Notice notice)? sendNoticeNow;
+
   /// Leaves for real, on the server as well as this phone.
+  ///
+  /// With money still open, everyone it is between is told first — the debt
+  /// stays in the group under your name, and nobody should find out from a
+  /// balance whose owner has quietly vanished.
   Future<bool> leaveGroupEverywhere(Group group) async {
     if (group.you == null || whyYouCannotLeave(group) != null) return false;
     if (!group.hasReachedServer || onLeave == null) return leaveGroup(group);
+    final you = group.you!;
+    for (final (other, amount) in openOnLeaving(group)) {
+      final to = _reachable(group, [other.id]);
+      if (to.isEmpty) continue;
+      await sendNoticeNow?.call(
+        Notice(
+          to: to,
+          groupId: group.id,
+          kind: NoticeKind.expenseChanged,
+          title: amount > 0
+              ? '${_theirNameFor(you)} left ${group.title} and still owes you ${inr(amount)}'
+              : '${_theirNameFor(you)} left ${group.title}. You still owe them ${inr(-amount)}',
+          body: 'It stays in the group under their name. Settle it with them directly.',
+          amount: amount.abs(),
+        ),
+      );
+    }
     if (!await onLeave!(group.id)) return false;
     groups.removeWhere((g) => g.id == group.id);
     _commit();
@@ -1381,9 +1449,14 @@ class MullStore extends ChangeNotifier {
       // Only ledgers pointing the way the money is going.
       if (theyOwe && balance <= 0) continue;
       if (!theyOwe && balance >= 0) continue;
-      final here = balance.abs() < left ? balance.abs() : left;
       final me = group.you!.id;
       final them = standing.seats[group.id]!;
+      // What is already claimed here is spoken for. Filling it again is paying
+      // one ledger twice while another stays open.
+      final open = balance.abs() -
+          (theyOwe ? group.claimedBetween(them, me) : group.claimedBetween(me, them));
+      if (open <= 0) continue;
+      final here = open < left ? open : left;
       written.add(
         settleUp(
           group,
@@ -1396,6 +1469,20 @@ class MullStore extends ChangeNotifier {
       left -= here;
     }
     return written;
+  }
+
+  /// Money said to have moved with this person, not yet confirmed, in the
+  /// direction the debt points. Left out of [Standing.amount] on purpose — a
+  /// claim is not a payment — but it is not still owed either.
+  int claimedWith(Standing standing) {
+    var total = 0;
+    for (final group in groups) {
+      final me = group.you?.id;
+      final them = standing.seats[group.id];
+      if (me == null || them == null) continue;
+      total += standing.theyOweYou ? group.claimedBetween(them, me) : group.claimedBetween(me, them);
+    }
+    return total;
   }
 
   void confirmSettlement(Group group, Settlement settlement) {
@@ -1763,18 +1850,25 @@ class MullStore extends ChangeNotifier {
   /// and an unreadable summary is the same as no summary.
   String groupSummary(Group group) {
     final lines = <String>['${group.title} · split on Mull', ''];
-    final transfers = simplify(group.balances);
-    if (transfers.isEmpty) {
+    // Who owes whom as it actually arose, pair by pair. The simplified version
+    // told people to pay somebody they never split anything with.
+    final pairs = <(Member, Member, int)>[];
+    final members = group.members;
+    for (var i = 0; i < members.length; i++) {
+      for (var j = i + 1; j < members.length; j++) {
+        final owedToI = group.pairBalance(members[i].id, members[j].id);
+        if (owedToI > 0) pairs.add((members[j], members[i], owedToI));
+        if (owedToI < 0) pairs.add((members[i], members[j], -owedToI));
+      }
+    }
+    if (pairs.isEmpty) {
       lines.add('All settled up.');
     } else {
-      for (final t in transfers) {
-        final from = group.memberById(t.from);
-        final to = group.memberById(t.to);
-        if (from == null || to == null) continue;
-        lines.add('${shortName(from)} → ${shortName(to)}: ${inr(t.amount)}');
+      for (final (from, to, amount) in pairs) {
+        lines.add('${shortName(from)} → ${shortName(to)}: ${inr(amount)}');
       }
       final upi = group.you?.upiId ?? profile.upiId;
-      if (upi != null && transfers.any((t) => t.to == group.you?.id)) {
+      if (upi != null && pairs.any((p) => p.$2.isYou)) {
         lines
           ..add('')
           ..add('Pay me at $upi');

@@ -1395,7 +1395,7 @@ void main() {
       expect(s.whyMemberStays(g, bhavya), contains('Only an admin'));
     });
 
-    test('leaving is yours to do, but not at the ledger\'s expense', () {
+    test('leaving is yours to do, even with money open', () {
       final s = signedIn();
       final g = s.addGroup('Flat', []);
       final sahil = s.addFriendAsMember(g, userId: newId(), name: 'Sahil')!;
@@ -1413,12 +1413,16 @@ void main() {
         payerId: g.you!.id,
         shares: splitEqually(800, [g.you!.id, sahil.id]),
       );
-      expect(s.whyYouCannotLeave(g), contains('Settle up first'));
-      expect(s.leaveGroup(g), isFalse);
-      expect(s.groups, hasLength(1));
+      // Owed money is not a reason to keep someone in. It is said, not refused.
+      expect(s.whyYouCannotLeave(g), isNull);
+      expect(s.openOnLeaving(g).single.$2, 400);
 
-      // Settled, the history is no longer a reason to stay.
-      s.settleUp(g, fromId: sahil.id, toId: g.you!.id, amount: 400);
+      // A payment only you can confirm is.
+      g.settlements.add(Settlement(fromId: sahil.id, toId: g.you!.id, amount: 400));
+      expect(s.whyYouCannotLeave(g), contains('says they paid you'));
+      expect(s.leaveGroup(g), isFalse);
+
+      g.settlements.single.status = SettlementStatus.confirmed;
       expect(s.whyYouCannotLeave(g), isNull);
       expect(s.leaveGroup(g), isTrue);
       expect(s.groups, isEmpty);
@@ -1541,6 +1545,95 @@ void main() {
       s.settleUp(g, fromId: g.you!.id, toId: sahil.id, amount: 500);
       expect(sent.single.title, startsWith('Ananya'));
       expect(sent.single.title, isNot(contains('You ')));
+    });
+  });
+
+  group('settling is only ever between you and one person', () {
+    MullStore signedIn() => MullStore.memory()..completeOnboarding(name: 'Ananya');
+
+    test('owed by one person and owing another does not cancel out', () {
+      final s = signedIn();
+      final g = s.addGroup('Trip', []);
+      final me = g.you!.id;
+      final rahul = s.addFriendAsMember(g, userId: newId(), name: 'Rahul')!;
+      final kabir = s.addFriendAsMember(g, userId: newId(), name: 'Kabir')!;
+      // You paid Rahul's 226; Kabir paid your 226.
+      s.addExpense(g, description: 'Cab', amount: 226, payerId: me, shares: {rahul.id: 226});
+      s.addExpense(g, description: 'Food', amount: 226, payerId: kabir.id, shares: {me: 226});
+
+      expect(g.yourBalance, 0, reason: 'the group-level net is what caused it');
+      expect(g.youAreSquare, isFalse);
+      expect(g.youOweHere, 226);
+      expect(g.owedToYouHere, 226);
+      expect(
+        g.yourTransfers.map((t) => '$t'),
+        ['$me → ${kabir.id}: 226', '${rahul.id} → $me: 226'],
+      );
+      // Rahul and Kabir are never told to pay each other.
+      expect(g.yourTransfers.any((t) => t.from == rahul.id && t.to == kabir.id), isFalse);
+      expect(s.groupSummary(g), isNot(contains('Rahul → Kabir')));
+    });
+
+    test('other people\'s debts are not yours to see', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', []);
+      final a = s.addFriendAsMember(g, userId: newId(), name: 'Asha')!;
+      final b = s.addFriendAsMember(g, userId: newId(), name: 'Bilal')!;
+      s.addExpense(g, description: 'Gas', amount: 500, payerId: a.id, shares: {b.id: 500});
+      expect(g.isSettled, isFalse);
+      expect(g.yourTransfers, isEmpty);
+    });
+
+    test('a sent claim is counted, so the same debt cannot be paid twice', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', []);
+      final me = g.you!.id;
+      final sahil = s.addFriendAsMember(g, userId: newId(), name: 'Sahil')!;
+      s.addExpense(g, description: 'Rent', amount: 1000, payerId: sahil.id, shares: {me: 1000});
+
+      s.settleUp(g, fromId: me, toId: sahil.id, amount: 600);
+      expect(g.claimedBetween(me, sahil.id), 600);
+      final standing = s.standingWith(sahil)!;
+      expect(s.claimedWith(standing), 600);
+
+      // Settling across ledgers fills only what is not already claimed.
+      final written = s.settleAcross(standing, amount: 1000);
+      expect(written.single.amount, 400);
+      expect(g.claimedBetween(me, sahil.id), 1000);
+    });
+
+    test('two people not on Mull are the one pair you keep the books for', () {
+      final s = signedIn();
+      final g = s.addGroup('Dinner', ['Kabir', 'Dev']);
+      final kabir = g.members.firstWhere((m) => m.name == 'Kabir');
+      final dev = g.members.firstWhere((m) => m.name == 'Dev');
+      final friend = s.addFriendAsMember(g, userId: newId(), name: 'Sahil')!;
+      s.addExpense(g, description: 'Bill', amount: 900, payerId: kabir.id, shares: {dev.id: 450, friend.id: 450});
+
+      expect(g.yourTransfers, isEmpty);
+      // Kabir and Dev: both placeholders, so yours to record.
+      expect(g.placeholderTransfers.map((t) => (t.from, t.to, t.amount)), [(dev.id, kabir.id, 450)]);
+      // Sahil has an account, so his debt to Kabir is not.
+      expect(g.placeholderTransfers.any((t) => t.from == friend.id), isFalse);
+    });
+
+    test('you cannot unfriend someone while money is open', () {
+      final s = signedIn();
+      final g = s.addGroup('Flat', []);
+      final me = g.you!.id;
+      final userId = newId();
+      final sahil = s.addFriendAsMember(g, userId: userId, name: 'Sahil')!;
+      expect(s.whyYouCannotUnfriend(userId), isNull);
+
+      s.addExpense(g, description: 'Rent', amount: 300, payerId: me, shares: {sahil.id: 300});
+      expect(s.whyYouCannotUnfriend(userId), contains('owes you'));
+      expect(s.whyYouCannotUnfriend(userId), contains('block'));
+
+      s.settleUp(g, fromId: sahil.id, toId: me, amount: 300);
+      expect(s.whyYouCannotUnfriend(userId), isNull);
+
+      g.settlements.add(Settlement(fromId: me, toId: sahil.id, amount: 50));
+      expect(s.whyYouCannotUnfriend(userId), contains('waiting'));
     });
   });
 }

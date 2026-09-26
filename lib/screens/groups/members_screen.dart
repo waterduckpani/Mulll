@@ -195,8 +195,10 @@ class _MemberRow extends StatelessWidget {
     // almost everyone read as being about them and you. It can point the
     // opposite way to the truth: Sahil can be owed by the group while owing
     // you directly, and the screen said so with a straight face.
+    // Your own row says what you owe here, which outranks what you are owed;
+    // the two are never netted, because they are owed to different people.
     final balance = member.isYou
-        ? group.yourBalance
+        ? (group.youOweHere > 0 ? -group.youOweHere : group.owedToYouHere)
         : group.pairBalanceWithYou(member.id);
 
     final standing = switch (null) {

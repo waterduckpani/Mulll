@@ -73,6 +73,9 @@ class UpiApp {
       key == any.key ? any : all.where((a) => a.key == key).firstOrNull;
 
   Uri uriFor(Uri payment) => Uri.parse('$prefix?${payment.query}');
+
+  /// The app itself, nothing filled in. Null for [any], which is not an app.
+  Uri? get home => key == any.key ? null : Uri.parse('${prefix.split('://').first}://');
 }
 
 /// The UPI apps on this phone, in picker order. Empty on the simulator.
@@ -110,6 +113,17 @@ Future<bool> openUpiPayment({
   if (uri == payment) return false;
   try {
     return await launchUrl(payment, mode: LaunchMode.externalApplication);
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Opens [app] with nothing filled in, for paying by hand.
+Future<bool> openUpiAppBlank(UpiApp app) async {
+  final home = app.home;
+  if (home == null) return false;
+  try {
+    return await launchUrl(home, mode: LaunchMode.externalApplication);
   } catch (_) {
     return false;
   }

@@ -33,7 +33,9 @@ class NoticesInbox extends ChangeNotifier {
   final ValueNotifier<Notified?> arrived = ValueNotifier(null);
 
   /// Sends what a local edit generated. Wired to the store's [MullStore.onNotice].
-  void attachTo(MullStore store) => store.onNotice = (notice) => unawaited(NoticesService.send(notice));
+  void attachTo(MullStore store) => store
+    ..onNotice = ((notice) => unawaited(NoticesService.send(notice)))
+    ..sendNoticeNow = NoticesService.send;
 
   void start() {
     if (!Backend.isAvailable) return;

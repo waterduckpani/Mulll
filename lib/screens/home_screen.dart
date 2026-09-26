@@ -182,15 +182,19 @@ class _Headline extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.c;
     final store = context.store;
-    final net = store.netAcrossAll;
+    // What you owe and what you are owed are two numbers, never one. Netting
+    // them said "It all cancels out" when one friend owed you ₹226 and you
+    // owed a different friend ₹226 — neither of them is going to pay the other.
+    // Netting within one person, across ledgers, is still right, and
+    // [MullStore.standings] has already done it.
     final owed = MullStore.owedToYouIn(people);
     final owing = MullStore.youOweIn(people);
     final bothWays = owed > 0 && owing > 0;
 
-    final caption = switch (net) {
-      0 => bothWays ? 'Square, all in' : 'All square',
-      > 0 => "You're owed, all in",
-      _ => 'You owe, all in',
+    final caption = switch (null) {
+      _ when owing > 0 => 'You owe, all in',
+      _ when owed > 0 => "You're owed, all in",
+      _ => 'All square',
     };
 
     return Column(
@@ -198,8 +202,8 @@ class _Headline extends StatelessWidget {
       children: [
         HeroAmount(
           caption: caption,
-          amount: net == 0 ? null : net.abs(),
-          placeholder: bothWays ? 'It all\ncancels out.' : 'Nobody owes\nanybody.',
+          amount: owing > 0 ? owing : (owed > 0 ? owed : null),
+          placeholder: 'Nobody owes\nanybody.',
         ),
         if (bothWays)
           Pressable(
@@ -213,7 +217,7 @@ class _Headline extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        '${inr(owed)} owed to you · ${inr(owing)} you owe',
+                        'And ${inr(owed)} is owed to you · see who',
                         style: MullType.caption(c.ink3, size: 12.5),
                       ),
                     ),
@@ -840,13 +844,17 @@ class _LedgerRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.c;
     final store = context.store;
-    final balance = group.yourBalance;
-    final settled = balance == 0;
+    // Both directions, never netted: what you owe one person and what another
+    // owes you are two debts, and the row used to call them "settled up".
+    final owing = group.youOweHere;
+    final owed = group.owedToYouHere;
+    final settled = owing == 0 && owed == 0;
 
-    final (label, amount) = switch (balance) {
-      0 => ('settled up', null),
-      > 0 => ('you get back', balance),
-      _ => ('you owe', -balance),
+    final (label, amount) = switch (null) {
+      _ when owing > 0 && owed > 0 => ('get back ${inr(owed)} · you owe', owing),
+      _ when owing > 0 => ('you owe', owing),
+      _ when owed > 0 => ('you get back', owed),
+      _ => ('settled up', null),
     };
 
     // A settled ledger is still worth seeing and not worth reading. It sinks
@@ -997,13 +1005,13 @@ Future<void> showLedgerActions(BuildContext context, Group group) {
                 // The thing people most often came here to do, and the one
                 // action this menu did not offer. Settling was four screens
                 // deep with no shortcut to it anywhere.
-                if (!group.isSettled)
+                if (!group.youAreSquare)
                   SheetAction(
                     'Settle up',
-                    detail: switch (group.yourBalance) {
-                      0 => null,
-                      > 0 => 'you get back ${inr(group.yourBalance)}',
-                      _ => 'you owe ${inr(-group.yourBalance)}',
+                    detail: switch ((group.youOweHere, group.owedToYouHere)) {
+                      (> 0 && final owe, > 0 && final back) => 'you owe ${inr(owe)} · get back ${inr(back)}',
+                      (> 0 && final owe, _) => 'you owe ${inr(owe)}',
+                      (_, final back) => 'you get back ${inr(back)}',
                     },
                     onTap: () => run(
                       () => Navigator.of(context).push(

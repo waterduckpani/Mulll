@@ -74,6 +74,10 @@ class _FriendsSheetState extends State<_FriendsSheet> {
       FriendState.incoming => 'Decline',
       FriendState.outgoing => 'Cancel request',
     };
+    // Unfriending with money still open is off the table; blocking is not.
+    final stuck = friend.state == FriendState.friends && userId != null
+        ? context.readStore.whyYouCannotUnfriend(userId)
+        : null;
     final choice = await showMullSheet<String>(
       context,
       fitContent: true,
@@ -87,7 +91,13 @@ class _FriendsSheetState extends State<_FriendsSheet> {
               padding: const EdgeInsets.fromLTRB(10, 0, 10, 18),
               child: Text(friend.label, style: excon(26, tracking: -.02, color: sheet.c.ink)),
             ),
-            SecondaryButton(removeLabel, onTap: () => Navigator.of(sheet).pop('remove')),
+            if (stuck == null)
+              SecondaryButton(removeLabel, onTap: () => Navigator.of(sheet).pop('remove'))
+            else
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+                child: Text(stuck, style: ranade(13, height: 1.55, color: sheet.c.ink3)),
+              ),
             if (userId != null) ...[
               const SizedBox(height: 8),
               SecondaryButton('Report', onTap: () => Navigator.of(sheet).pop('report')),

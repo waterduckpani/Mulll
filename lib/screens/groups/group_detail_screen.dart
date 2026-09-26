@@ -2,7 +2,6 @@ import 'package:flutter/cupertino.dart';
 
 import '../../core/dates.dart';
 import '../../core/money.dart';
-import '../../core/split.dart';
 import '../../data/models.dart';
 import '../../data/store.dart';
 import '../../ui/icons.dart';
@@ -35,8 +34,11 @@ class GroupDetailScreen extends StatelessWidget {
     final group = store.groupById(groupId);
     if (group == null) return const SizedBox.shrink();
 
-    final balance = group.yourBalance;
-    final transfers = simplify(group.balances);
+    // Your two directions, never netted into one: owed ₹226 by one person and
+    // owing ₹226 to another is not "all settled up".
+    final owing = group.youOweHere;
+    final owed = group.owedToYouHere;
+    final transfers = group.yourTransfers;
     final claims = group.awaitingYourConfirmation;
     final due = group.recurring.where((r) => r.isDue(store.now())).toList();
     final active = group.recurring.where((r) => r.isActive).length;
@@ -131,16 +133,26 @@ class GroupDetailScreen extends StatelessWidget {
         ),
 
         HeroAmount(
-          caption: balance == 0
-              ? (group.expenses.isEmpty ? 'Nothing added yet' : 'All settled up')
-              : balance > 0
-              ? 'You get back'
-              : 'You owe',
-          amount: balance == 0 ? null : balance.abs(),
+          caption: switch (null) {
+            _ when owing > 0 => 'You owe',
+            _ when owed > 0 => 'You get back',
+            _ when group.expenses.isEmpty => 'Nothing added yet',
+            _ => "You're square",
+          },
+          amount: owing > 0 ? owing : (owed > 0 ? owed : null),
           size: 68,
-          placeholder: group.expenses.isEmpty ? 'Add the first\nexpense.' : 'Nobody owes\nanybody.',
+          placeholder: group.expenses.isEmpty ? 'Add the first\nexpense.' : 'You owe\nnobody here.',
           padding: const EdgeInsets.fromLTRB(Gutter.text, 34, Gutter.text, 0),
         ),
+        if (owing > 0 && owed > 0)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Gutter.text, 12, Gutter.text, 0),
+            child: Text(
+              'And you get back ${inr(owed)} from someone else. Separate people, '
+              'so neither cancels the other.',
+              style: MullType.caption(c.ink3, size: 12.5),
+            ),
+          ),
 
         const SizedBox(height: 42),
 
@@ -207,11 +219,11 @@ class GroupDetailScreen extends StatelessWidget {
           children: [
             _Destination(
               title: 'Settle up',
-              body: transfers.isEmpty
-                  ? 'Nothing outstanding right now'
-                  : transfers.length == 1
-                  ? 'One payment clears the group'
-                  : '${_words(transfers.length)} payments clear the group',
+              body: switch (transfers.length) {
+                0 => 'Nothing between you and anyone here',
+                1 => 'One payment with you in it',
+                final n => '${_words(n)} payments with you in them',
+              },
               lift: somethingWaiting || alone ? Lift.card : Lift.focal,
               onTap: () => push(SettleUpScreen(groupId: group.id)),
             ),

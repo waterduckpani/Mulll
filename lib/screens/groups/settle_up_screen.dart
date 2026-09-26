@@ -9,11 +9,12 @@ import '../../ui/tokens.dart';
 import '../../ui/widgets.dart';
 import 'group_sheets.dart';
 
-/// The fewest payments that clear the group, and what to do about each one.
+/// What you owe, and what you are owed, in one group — and nothing else.
 ///
-/// The whole point of Mull in one screen: eleven expenses between four people
-/// come down to two transfers, and every one of them says plainly whose move
-/// it is.
+/// It used to show the fewest transfers that clear the whole group. That put
+/// other people's payments on your screen with a "Mark as settled" button, and
+/// it netted you out of the middle: owed ₹226 by one person and owing ₹226 to
+/// another, you were "square" and they were told to pay each other.
 class SettleUpScreen extends StatelessWidget {
   const SettleUpScreen({super.key, required this.groupId});
 
@@ -21,54 +22,25 @@ class SettleUpScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = context.c;
     final store = context.store;
     final group = store.groupById(groupId);
     if (group == null) return const SizedBox.shrink();
 
-    // Only transfers between people who are still here.
-    //
-    // A member removed elsewhere can keep a balance — it is real history — and
-    // simplify will happily name them in a payment. The card for it then drew
-    // nothing, so the page announced "three payments clear this group" above
-    // two, and the missing one could never be settled by anybody.
-    final transfers = [
-      for (final t in simplify(group.balances))
-        if (group.memberById(t.from) != null && group.memberById(t.to) != null) t,
-    ];
-    final orphaned = simplify(group.balances).length - transfers.length;
-    final me = group.you?.id;
-
-    // A claim already sitting against a transfer changes what the row is for:
-    // there is nothing to pay, only something to confirm.
-    Settlement? claimAgainst(Transfer t) => group.settlements
-        .where(
-          (s) =>
-              s.status == SettlementStatus.pending &&
-              s.fromId == t.from &&
-              s.toId == t.to,
-        )
-        .firstOrNull;
-
-    // One focal object: the first row that is actually yours to move on.
-    Transfer? focal;
-    for (final t in transfers) {
-      if (t.from == me || t.to == me) {
-        focal = t;
-        break;
-      }
-    }
+    final transfers = group.yourTransfers;
+    final books = group.placeholderTransfers;
+    final owing = group.youOweHere;
+    final owed = group.owedToYouHere;
+    // Balances between other people are theirs. Said once, so an empty screen
+    // in a group that is plainly not settled does not read as a bug.
+    final othersOpen = transfers.isEmpty && books.isEmpty && !group.isSettled;
 
     return MullPage(
       glow: const GlowSpec(size: 440, top: -160, right: -150),
       header: const DetailBar(),
       footnote: transfers.isEmpty
           ? null
-          : orphaned > 0
-          ? 'Someone who has left this group still has a balance in it. Their '
-                'share stays in the history and cannot be settled here.'
           : 'Money never moves through Mull.\nPay over UPI, then say it went through.',
-      bottom: transfers.isEmpty
+      bottom: group.isSettled
           ? null
           : SecondaryButton(
               'Send summary on WhatsApp',
@@ -76,37 +48,26 @@ class SettleUpScreen extends StatelessWidget {
             ),
       children: [
         PageStatement(
-          switch (transfers.length) {
-            0 => group.expenses.isEmpty
-                ? 'Nothing added to this group yet'
-                : 'Everyone is square',
-            1 => 'One payment clears this group',
-            2 => 'Two payments clear this group',
-            3 => 'Three payments clear this group',
-            _ => '${transfers.length} payments clear this group',
+          switch (null) {
+            _ when group.expenses.isEmpty => 'Nothing added to this group yet',
+            _ when transfers.isEmpty => "You're square here",
+            _ when owing > 0 && owed > 0 => 'You owe ${inr(owing)} and are owed ${inr(owed)}',
+            _ when owing > 0 => 'You owe ${inr(owing)}',
+            _ => "You're owed ${inr(owed)}",
           },
-          body: group.expenses.isEmpty
-              ? 'Add an expense and Mull starts working out who owes whom.'
-              : '${group.title} · ${inr(group.total)} spent between '
-                    '${group.members.length} people',
+          body: switch (null) {
+            _ when group.expenses.isEmpty => 'Add an expense and Mull starts working out who owes whom.',
+            _ when othersOpen =>
+              'Other people here still owe each other. That is between them, '
+                  'and only they can settle it.',
+            _ when owing > 0 && owed > 0 =>
+              'These are separate people, so they do not cancel out. Each one '
+                  'is settled on its own.',
+            _ => '${group.title} · ${inr(group.total)} spent between '
+                '${group.members.length} people',
+          },
           padding: const EdgeInsets.fromLTRB(Gutter.text, 30, Gutter.text, 0),
         ),
-
-        // Simplification can name two people who never transacted, which is
-        // the right answer and a surprising one. Said out loud it reads as
-        // clever; unsaid it reads as a bug, and people go looking for the
-        // expense they had with somebody they have never split anything with.
-        if (transfers.isNotEmpty && group.simplifyReroutes)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(Gutter.text, 22, Gutter.text, 0),
-            child: Text(
-              'Some of these pair people who did not spend anything together. '
-              'Passing the money straight along is what makes it '
-              '${transfers.length == 1 ? 'one payment' : '${transfers.length} payments'} '
-              'instead of one per expense. Tap any row to see where it came from.',
-              style: MullType.caption(c.ink3),
-            ),
-          ),
 
         if (transfers.isNotEmpty) ...[
           const SizedBox(height: 40),
@@ -119,8 +80,32 @@ class SettleUpScreen extends StatelessWidget {
                   key: ValueKey('${t.from}-${t.to}'),
                   group: group,
                   transfer: t,
-                  claim: claimAgainst(t),
-                  lift: t == focal ? Lift.focal : Lift.card,
+                  lift: t == transfers.first ? Lift.focal : Lift.card,
+                ),
+            ],
+          ),
+        ],
+
+        // Two people with no account between them have nobody else to write
+        // their payment down. Anybody else's is theirs alone.
+        if (books.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Gutter.text, 40, Gutter.text, 14),
+            child: Text(
+              'Neither of these people is on Mull, so you keep the record for them.',
+              style: MullType.caption(context.c.ink3),
+            ),
+          ),
+          Stacked(
+            gap: 8,
+            padding: const EdgeInsets.symmetric(horizontal: Gutter.card),
+            children: [
+              for (final t in books)
+                _TransferCard(
+                  key: ValueKey('${t.from}-${t.to}'),
+                  group: group,
+                  transfer: t,
+                  lift: Lift.flat,
                 ),
             ],
           ),
@@ -135,13 +120,11 @@ class _TransferCard extends StatelessWidget {
     super.key,
     required this.group,
     required this.transfer,
-    required this.claim,
     required this.lift,
   });
 
   final Group group;
   final Transfer transfer;
-  final Settlement? claim;
   final Lift lift;
 
   @override
@@ -153,35 +136,66 @@ class _TransferCard extends StatelessWidget {
     if (from == null || to == null) return const SizedBox.shrink();
 
     final youPay = from.isYou;
-    final youAreOwed = to.isYou;
+    final forThem = !youPay && !to.isYou;
+    final other = youPay ? to : from;
+    final name = store.shortName(other);
 
-    final title = youPay
-        ? 'You pay ${store.shortName(to)}'
-        : youAreOwed
-        ? '${store.shortName(from)} pays you'
-        : '${store.shortName(from)} pays ${store.shortName(to)}';
+    // What has already been said to have gone, and what that leaves. A claim
+    // does not move the balance until it is confirmed, so without this the
+    // card kept offering the whole amount again — pay twice, and send them a
+    // second "says they sent you" for the same money.
+    final claimed = group.claimedBetween(transfer.from, transfer.to);
+    final left = (transfer.amount - claimed).clamp(0, transfer.amount);
+    final claim = group.settlements
+        .where(
+          (s) =>
+              s.status == SettlementStatus.pending &&
+              s.fromId == transfer.from &&
+              s.toId == transfer.to,
+        )
+        .firstOrNull;
+
+    final title = forThem
+        ? '${store.shortName(from)} pays ${store.shortName(to)}'
+        : youPay
+        ? 'You pay $name'
+        : '$name pays you';
+    final shown = claimed > 0 && left > 0 ? left : transfer.amount;
 
     final detail = switch (null) {
-      _ when claim != null && youAreOwed => 'They said they sent it · waiting on you to confirm',
-      _ when claim != null => 'Claimed · waiting on ${store.shortName(to)} to confirm',
+      _ when forThem => 'Neither is on Mull · mark it once they have settled',
+      _ when claim != null && !youPay && left == 0 => 'They said they sent it · check and confirm',
+      _ when claim != null && !youPay =>
+        'They said they sent ${inr(claimed)} · check and confirm',
+      _ when claim != null && left == 0 => 'Sent · waiting on $name to confirm',
+      _ when claim != null => '${inr(claimed)} sent, waiting on $name · ${inr(left)} still to pay',
       _ when youPay && to.upiId != null => 'Pay over UPI, then say it went through',
       _ when youPay => 'No UPI ID on their seat yet · settle in person, then mark it',
-      _ when !from.isLinked && youAreOwed => 'Not on Mull · settle in person, then mark it',
-      _ when youAreOwed => 'Nudge them, or mark it once it lands',
-      _ => 'Between them. Mull just keeps the record',
+      _ when !from.isLinked => 'Not on Mull · settle in person, then mark it',
+      _ => 'Nudge them, or mark it once it lands',
     };
 
-    return Pressable(
-      onTap: () {
-        final pending = claim;
-        if (pending != null && youAreOwed) {
-          showClaimCheck(context, group, pending);
-        } else {
+    void open() {
+      switch (claim) {
+        case _ when forThem:
           showSettleUp(context, group, transfer);
-        }
-      },
+        case final pending? when !youPay:
+          showClaimCheck(context, group, pending);
+        case final pending? when left == 0:
+          showOwnClaim(context, group, pending);
+        default:
+          showSettleUp(
+            context,
+            group,
+            Transfer(from: transfer.from, to: transfer.to, amount: youPay ? left : transfer.amount),
+          );
+      }
+    }
+
+    return Pressable(
+      onTap: open,
       scale: .985,
-      semanticLabel: '$title ${inr(transfer.amount)}. $detail',
+      semanticLabel: '$title ${inr(shown)}. $detail',
       child: ExcludeSemantics(
         child: Container(
           padding: const EdgeInsets.fromLTRB(24, 20, 24, 22),
@@ -202,7 +216,7 @@ class _TransferCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 10),
-                  Text(inr(transfer.amount), style: MullType.cardAmount(c.ink, size: 22)),
+                  Text(inr(shown), style: MullType.cardAmount(c.ink, size: 22)),
                 ],
               ),
               const SizedBox(height: 8),

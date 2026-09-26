@@ -688,6 +688,10 @@ class Group {
   }
 
   /// Your own position, or 0 in a group you are somehow not part of.
+  ///
+  /// A net across different people, so never show it as what you owe: owed
+  /// ₹226 by one person and owing ₹226 to another comes out as 0. Use
+  /// [youOweHere] and [owedToYouHere].
   int get yourBalance => balances[you?.id] ?? 0;
 
   /// What two people owe each other in this ledger, and nobody else.
@@ -733,6 +737,65 @@ class Group {
     }
     return false;
   }
+
+  /// What there is for *you* to settle here: one row per person you owe or who
+  /// owes you, as the debt actually arose.
+  ///
+  /// Never [simplify]. Simplification nets you out of the middle — owed ₹226
+  /// by Ananya and owing ₹226 to Kabir made you "square" and told Ananya to
+  /// pay Kabir, a stranger to her — and it put other people's payments on
+  /// your screen with a button to mark them settled.
+  List<Transfer> get yourTransfers {
+    final me = you;
+    if (me == null) return const [];
+    return [
+      for (final other in members)
+        if (!other.isYou)
+          switch (pairBalance(me.id, other.id)) {
+            > 0 && final n => Transfer(from: other.id, to: me.id, amount: n),
+            < 0 && final n => Transfer(from: me.id, to: other.id, amount: -n),
+            _ => null,
+          },
+    ].nonNulls.toList()
+      // What you owe first, then biggest first.
+      ..sort((a, b) {
+        final mine = (a.from == me.id ? 0 : 1).compareTo(b.from == me.id ? 0 : 1);
+        return mine != 0 ? mine : b.amount.compareTo(a.amount);
+      });
+  }
+
+  /// Debts between two people who are both not on Mull.
+  ///
+  /// Nobody on either side can ever record these, so whoever keeps the
+  /// group's books does. The server allows exactly this and nothing wider: a
+  /// payment between two people with accounts is theirs alone.
+  List<Transfer> get placeholderTransfers {
+    final seats = members.where((m) => !m.isYou && !m.isLinked).toList();
+    return [
+      for (var i = 0; i < seats.length; i++)
+        for (var j = i + 1; j < seats.length; j++)
+          switch (pairBalance(seats[i].id, seats[j].id)) {
+            > 0 && final n => Transfer(from: seats[j].id, to: seats[i].id, amount: n),
+            < 0 && final n => Transfer(from: seats[i].id, to: seats[j].id, amount: -n),
+            _ => null,
+          },
+    ].nonNulls.toList();
+  }
+
+  /// Your two directions here, kept apart. Adding them together is the bug
+  /// [yourTransfers] exists to avoid.
+  int get youOweHere => yourTransfers.where((t) => t.from == you?.id).fold(0, (s, t) => s + t.amount);
+  int get owedToYouHere => yourTransfers.where((t) => t.to == you?.id).fold(0, (s, t) => s + t.amount);
+
+  /// Whether you personally have nothing left open with anybody here.
+  bool get youAreSquare => yourTransfers.isEmpty;
+
+  /// Money [fromId] says they sent [toId] that nobody has confirmed yet.
+  /// Counted against what is left to pay, so the same debt cannot be paid —
+  /// and announced — twice.
+  int claimedBetween(String fromId, String toId) => settlements
+      .where((s) => s.status == SettlementStatus.pending && s.fromId == fromId && s.toId == toId)
+      .fold(0, (sum, s) => sum + s.amount);
 
   bool get isSettled => balances.values.every((v) => v == 0);
 
@@ -791,7 +854,8 @@ class Profile {
     this.upiId,
     this.phone,
     this.payWith,
-  });
+    List<String>? payByHand,
+  }) : payByHand = payByHand ?? [];
 
   String name;
   ThemeMode theme;
@@ -809,6 +873,12 @@ class Profile {
   /// someone with more than one app picks.
   String? payWith;
 
+  /// UPI apps that refused a filled-in payment on this phone. Paytm answers
+  /// some with "a technical error occurred" — it will not always take an
+  /// amount from a link to a personal UPI ID — so for these Mull copies the ID
+  /// and opens the app blank instead of failing the same way every time.
+  List<String> payByHand;
+
   String get initial => name.trim().isEmpty ? '·' : name.trim()[0].toUpperCase();
 
   Map<String, dynamic> toJson() => {
@@ -818,6 +888,7 @@ class Profile {
     'upiId': upiId,
     'phone': phone,
     'payWith': payWith,
+    'payByHand': payByHand,
   };
 
   factory Profile.fromJson(Map<String, dynamic> j) => Profile(
@@ -827,5 +898,6 @@ class Profile {
     upiId: j['upiId'] as String?,
     phone: j['phone'] as String?,
     payWith: j['payWith'] as String?,
+    payByHand: (j['payByHand'] as List?)?.cast<String>(),
   );
 }
